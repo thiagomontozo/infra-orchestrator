@@ -226,7 +226,7 @@ HTTPS, origin correta, CA corporativa, backups, serviços HA externos e permiss�
 
 ## 57. Git Repository
 
-O repositório público será registrado aqui após o push final.
+[thiagomontozo/infra-orchestrator](https://github.com/thiagomontozo/infra-orchestrator), público, branch padrão `main`.
 
 ## 58. Branch
 
@@ -234,7 +234,7 @@ O repositório público será registrado aqui após o push final.
 
 ## 59. Final Commit
 
-Será registrado após todos os gates finais e scans.
+Consulte o HEAD da branch `main` no repositório público; a mensagem final de entrega registra o hash publicado.
 
 ## 60. Recommended Next Steps
 
