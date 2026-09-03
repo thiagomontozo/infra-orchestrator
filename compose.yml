@@ -1,0 +1,98 @@
+name: infra-orchestrator
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: orchestrator
+      POSTGRES_USER: orchestrator
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    networks: [data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U orchestrator -d orchestrator"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  redis:
+    image: redis:7.4.5-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["redis-data:/data"]
+    networks: [data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  nats:
+    image: nats:2.11.8-alpine
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    volumes: ["nats-data:/data"]
+    networks: [data]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://localhost:8222/healthz]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: infra-orchestrator-backend:local
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://orchestrator:${POSTGRES_PASSWORD}@postgres:5432/orchestrator?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      NATS_URL: nats://nats:4222
+      EMBEDDED_WORKER: "false"
+    networks: [data,control,egress]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      nats: {condition: service_healthy}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+  worker:
+    image: infra-orchestrator-backend:local
+    entrypoint: [/app/worker]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://orchestrator:${POSTGRES_PASSWORD}@postgres:5432/orchestrator?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      NATS_URL: nats://nats:4222
+    networks: [data,egress]
+    depends_on:
+      server: {condition: service_healthy}
+    healthcheck: {disable: true}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    image: infra-orchestrator-frontend:local
+    ports: ["127.0.0.1:${FRONTEND_PORT:-8080}:8080"]
+    networks: [control]
+    depends_on:
+      server: {condition: service_healthy}
+    read_only: true
+    tmpfs: [/tmp,/var/cache/nginx,/var/run]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+volumes:
+  postgres-data:
+  redis-data:
+  nats-data:
+networks:
+  data: {internal: true}
+  control: {internal: true}
+  egress: {}

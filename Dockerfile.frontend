@@ -1,0 +1,11 @@
+FROM node:24-alpine AS build
+WORKDIR /src
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=secret,id=extra_ca if [ -s /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca; fi; npm ci --ignore-scripts
+COPY web/ ./
+RUN npm run build
+FROM nginxinc/nginx-unprivileged:1.30-alpine
+COPY deployments/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /src/dist /usr/share/nginx/html
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1

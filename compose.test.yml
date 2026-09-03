@@ -1,0 +1,34 @@
+name: infra-orchestrator-test
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: orchestrator_test
+      POSTGRES_USER: orchestrator
+      POSTGRES_PASSWORD: ${TEST_DB_PASSWORD:?Generate TEST_DB_PASSWORD}
+    ports: ["127.0.0.1:55432:5432"]
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U orchestrator -d orchestrator_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  redis:
+    image: redis:7.4.5-alpine
+    ports: ["127.0.0.1:56379:6379"]
+  nats:
+    image: nats:2.11.8-alpine
+    command: ["-js"]
+    ports: ["127.0.0.1:54222:4222"]
+  ssh-target:
+    build: tests/ssh-target
+    image: infra-orchestrator-ssh-test:local
+    profiles: [remote]
+    privileged: true
+    ports: ["127.0.0.1:55222:22"]
+    volumes: ["./.local/ssh-test:/test-keys:ro"]
+    healthcheck:
+      test: [CMD, docker, info]
+      interval: 3s
+      timeout: 3s
+      retries: 40

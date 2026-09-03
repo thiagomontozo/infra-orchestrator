@@ -1,0 +1,16 @@
+FROM golang:1.26.6-alpine AS build
+WORKDIR /src
+RUN --mount=type=secret,id=extra_ca if [ -s /run/secrets/extra_ca ]; then cat /run/secrets/extra_ca >> /etc/ssl/certs/ca-certificates.crt; fi; apk add --no-cache ca-certificates git tzdata
+COPY go.mod go.sum ./
+RUN --mount=type=secret,id=extra_ca if [ -s /run/secrets/extra_ca ]; then cat /run/secrets/extra_ca >> /etc/ssl/certs/ca-certificates.crt; fi; go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/server ./cmd/server && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/worker ./cmd/worker && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/infra-orchestrator ./cmd/cli
+FROM scratch
+COPY --from=build /out/ /app/
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /usr/share/zoneinfo /usr/share/zoneinfo
+COPY docs/openapi.yaml /app/docs/openapi.yaml
+USER 65532:65532
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD ["/app/infra-orchestrator","health"]
+ENTRYPOINT ["/app/server"]
