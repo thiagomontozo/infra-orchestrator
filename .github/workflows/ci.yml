@@ -1,0 +1,88 @@
+name: quality-and-security
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-go@v5
+        with: {go-version-file: go.mod, cache: true}
+      - uses: actions/setup-node@v4
+        with: {node-version: '24', cache: npm, cache-dependency-path: web/package-lock.json}
+      - name: Prepare isolated integration services
+        run: |
+          mkdir -p .local/ssh-test
+          openssl rand -hex 24 | sed 's/^/TEST_DB_PASSWORD=/' > .local/test.env
+          ssh-keygen -q -t ed25519 -N '' -f .local/ssh-test/test_key
+          cp .local/ssh-test/test_key.pub .local/ssh-test/authorized_keys
+          docker compose --env-file .local/test.env -f compose.test.yml --profile remote up --build -d --wait
+          set -a
+          . .local/test.env
+          set +a
+          echo "TEST_DATABASE_URL=postgres://orchestrator:$TEST_DB_PASSWORD@127.0.0.1:55432/orchestrator_test?sslmode=disable" >> "$GITHUB_ENV"
+          echo "TEST_SSH_KEY=$PWD/.local/ssh-test/test_key" >> "$GITHUB_ENV"
+      - name: Format and vet
+        run: |
+          test -z "$(gofmt -l cmd internal migrations)"
+          go vet ./...
+      - name: Backend unit, security and real integration tests
+        run: go test -race -count=1 ./...
+      - name: Frontend quality and production build
+        working-directory: web
+        run: |
+          npm ci
+          npm run lint
+          npm test
+          npm run build
+          npm audit --audit-level=high
+      - name: OpenAPI stays current
+        run: |
+          node scripts/build-openapi.mjs
+          git diff --exit-code docs/openapi.yaml
+      - name: Go dependency security
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+      - name: Secret scan history and working tree
+        run: |
+          docker run --rm -v "$PWD:/src" zricethezav/gitleaks:v8.24.3 git /src --redact --no-banner
+          mkdir -p .local/source-review
+          git archive HEAD | tar -x -C .local/source-review
+          docker run --rm -v "$PWD/.local/source-review:/src" zricethezav/gitleaks:v8.24.3 dir /src --redact --no-banner
+      - name: Build binaries
+        run: |
+          mkdir -p .local/bin
+          go build -trimpath -o .local/bin/server ./cmd/server
+          go build -trimpath -o .local/bin/worker ./cmd/worker
+          go build -trimpath -o .local/bin/infra-orchestrator ./cmd/cli
+      - name: Browser acceptance with real SSH target
+        run: bash scripts/ci-e2e.sh
+      - name: Build containers
+        run: |
+          docker build -f Dockerfile.backend -t infra-orchestrator-backend:ci .
+          docker build -f Dockerfile.frontend -t infra-orchestrator-frontend:ci .
+      - name: Image vulnerabilities and SBOM
+        run: |
+          for image in infra-orchestrator-backend:ci infra-orchestrator-frontend:ci; do
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.69.3 image --exit-code 1 --severity HIGH,CRITICAL "$image"
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.69.3 image --format cyclonedx "$image" > ".local/${image%:ci}.sbom.json"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validation-artifacts
+          path: |
+            web/playwright-report
+            .local/*.sbom.json
+          retention-days: 7
+      - name: Remove project test containers
+        if: always()
+        run: docker compose --env-file .local/test.env -f compose.test.yml --profile remote down --volumes --remove-orphans
