@@ -1,5 +1,9 @@
 # infra-orchestrator
 
+[![Quality and security](https://github.com/thiagomontozo/infra-orchestrator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/thiagomontozo/infra-orchestrator/actions/workflows/ci.yml)
+![Go](https://img.shields.io/badge/Go-1.26.6-00ADD8?logo=go&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Control plane de infraestrutura com backend Go e interface React/TypeScript. Gerencia inventário remoto, operações auditadas, aprovações, containers, serviços e diagnósticos por LLM. O nome exibido é configurável por `APP_NAME`.
 
 > Código em desenvolvimento ativo. Consulte [a matriz de implementação e validação](docs/STATUS.md) e [o relatório de testes](docs/TEST_RESULTS.md) antes de usar em produção. Testes com fixtures não representam certificação de clusters ou provedores externos.
