@@ -18,11 +18,31 @@ type Service struct {
 }
 
 func (s *Service) Discover(ctx context.Context, h domain.Host) (map[string]any, error) {
+	if h.AuthMethod == "kubeconfig" {
+		a := s.Adapters["kubernetes-api"]
+		rs, e := a.Discover(ctx, h)
+		if e != nil {
+			h.State = "offline"
+			_ = s.DB.ObserveHost(ctx, h)
+			return nil, e
+		}
+		if e = s.DB.UpsertResources(ctx, h.ID, "kubernetes-api", rs); e != nil {
+			return nil, e
+		}
+		now := time.Now().UTC()
+		h.State = "online"
+		h.LastSeen = &now
+		h.Facts = map[string]any{"runtimes": []string{"kubernetes-api"}, "resources": len(rs)}
+		if e = s.DB.ObserveHost(ctx, h); e != nil {
+			return nil, e
+		}
+		return h.Facts, nil
+	}
 	facts := map[string]any{}
 	hostname, e := s.Executor.Run(ctx, h, executor.Command{Program: "hostname", Args: []string{"-f"}})
 	if e != nil {
 		h.State = "offline"
-		_ = s.DB.SaveHost(ctx, h)
+		_ = s.DB.ObserveHost(ctx, h)
 		_ = s.DB.Audit(ctx, domain.Event{HostID: h.ID, Environment: h.Environment, ActorType: "worker", Action: "host.offline", Result: "SSH discovery failed"})
 		return nil, e
 	}
@@ -65,7 +85,7 @@ func (s *Service) Discover(ctx context.Context, h domain.Host) (map[string]any, 
 	}
 	now := time.Now().UTC()
 	h.LastSeen = &now
-	if e = s.DB.SaveHost(ctx, h); e != nil {
+	if e = s.DB.ObserveHost(ctx, h); e != nil {
 		return nil, e
 	}
 	if e = s.DB.Audit(ctx, domain.Event{HostID: h.ID, Environment: h.Environment, ActorType: "worker", Action: "host.online", Metadata: map[string]any{"resources": count, "runtimes": detected}}); e != nil {

@@ -1,0 +1,1 @@
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS target_hash text NOT NULL DEFAULT '';

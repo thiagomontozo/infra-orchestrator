@@ -69,13 +69,14 @@ type connection struct {
 	closers []io.Closer
 }
 
-func (c *connection) Close() {
+func (c *connection) Close() error {
 	if c.client != nil {
 		c.client.Close()
 	}
 	for _, v := range c.closers {
 		v.Close()
 	}
+	return nil
 }
 func (s *SSH) config(ctx context.Context, h domain.Host) (*ssh.ClientConfig, []io.Closer, error) {
 	var closers []io.Closer
@@ -234,7 +235,7 @@ func (s *SSH) Run(ctx context.Context, h domain.Host, cmd Command) (Result, erro
 		return out, e
 	}
 	defer conn.Close()
-	stop := context.AfterFunc(ctx, conn.Close)
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
 	session, e := conn.client.NewSession()
 	if e != nil {

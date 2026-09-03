@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated local test state and third-party dependencies; never committed"
+paths = ['''^\.local/''', '''^web/node_modules/''', '''^web/dist/''', '''^web/test-results/''', '''^web/playwright-report/''', '''(^|.*/)\.env\.example$''', '''(^|.*/)internal/security/security_test\.go$''']

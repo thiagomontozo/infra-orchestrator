@@ -1,0 +1,2 @@
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS ready boolean NOT NULL DEFAULT false;
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS request_hash text NOT NULL DEFAULT '';

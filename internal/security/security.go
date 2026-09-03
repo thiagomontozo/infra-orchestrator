@@ -121,6 +121,7 @@ func VerifyTOTP(secret, code string, now time.Time, last int64) (int64, bool) {
 }
 
 var redactions = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(?:authorization\s*[:=]\s*)?(?:bearer|basic)\s+[A-Za-z0-9_./+=-]+`),
 	regexp.MustCompile(`(?is)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`),
 	regexp.MustCompile(`(?i)(?:authorization|bearer|api[_-]?key|password|passwd|secret|cookie|token)\s*[=: ]\s*[^\s,;]+`),
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`),

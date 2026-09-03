@@ -84,7 +84,7 @@ type Decision struct {
 
 func Risk(action string) string {
 	switch action {
-	case "delete", "down", "recreate", "deploy", "run", "stop", "rollback":
+	case "delete", "down", "recreate", "deploy", "run", "stop", "rollback", "create":
 		return "high"
 	case "restart", "scale", "reload", "pause":
 		return "medium"

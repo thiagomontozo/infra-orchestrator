@@ -143,6 +143,10 @@ func (a *CLI) Discover(ctx context.Context, h domain.Host) ([]domain.Resource, e
 	if e != nil {
 		return nil, e
 	}
+	resources, e = a.extendDiscovery(ctx, h, resources)
+	if e != nil {
+		return nil, e
+	}
 	for i := range resources {
 		resources[i].Provider = a.Provider
 		resources[i].Environment = h.Environment
@@ -156,6 +160,9 @@ func (a *CLI) Capabilities(r domain.Resource) []string {
 	case "docker", "podman":
 		return []string{"inspect", "logs", "stats", "start", "stop", "restart", "pause", "unpause"}
 	case "dockercompose", "podmancompose":
+		if r.Type == "docker_compose_service" {
+			return []string{"logs", "up", "start", "stop", "restart", "recreate"}
+		}
 		return []string{"logs", "up", "down", "start", "stop", "restart", "recreate"}
 	case "systemd":
 		return []string{"status", "logs", "start", "stop", "restart", "reload"}
@@ -173,11 +180,20 @@ func (a *CLI) Capabilities(r domain.Resource) []string {
 			return []string{"describe", "events"}
 		}
 	case "nomad":
+		if r.Type == "nomad_group" || r.Type == "nomad_node" {
+			return []string{"status"}
+		}
 		if r.Type == "nomad_allocation" {
 			return []string{"status", "logs", "restart"}
 		}
 		return []string{"status", "run", "stop"}
 	case "swarm":
+		if r.Type == "docker_swarm_stack" {
+			return []string{"status", "deploy"}
+		}
+		if r.Type == "docker_swarm_node" {
+			return []string{"status"}
+		}
 		return []string{"inspect", "logs", "scale", "restart"}
 	case "supervisor":
 		return []string{"status", "logs", "start", "stop", "restart"}
@@ -272,6 +288,12 @@ func (a *CLI) Build(r domain.Resource, action string, p map[string]any) (executo
 			args = []string{action, id}
 		}
 	case "dockercompose", "podmancompose":
+		if project := domain.String(r.Metadata, "project"); project != "" {
+			if !executor.ValidRef(project) {
+				return empty, fmt.Errorf("invalid compose project")
+			}
+			id = project
+		}
 		args = []string{"--project-name", id}
 		if files := domain.String(r.Metadata, "config_files"); files != "" {
 			for _, path := range strings.Split(files, ",") {
@@ -347,7 +369,11 @@ func (a *CLI) Build(r domain.Resource, action string, p map[string]any) (executo
 	case "nomad":
 		switch action {
 		case "status":
-			if r.Type == "nomad_allocation" {
+			if r.Type == "nomad_node" {
+				args = []string{"node", "status", "-json", domain.String(r.Metadata, "id")}
+			} else if r.Type == "nomad_group" {
+				args = []string{"job", "status", "-json", domain.String(r.Metadata, "job_id")}
+			} else if r.Type == "nomad_allocation" {
 				args = []string{"alloc", "status", "-json", id}
 			} else {
 				args = []string{"job", "status", "-json", id}
@@ -369,6 +395,23 @@ func (a *CLI) Build(r domain.Resource, action string, p map[string]any) (executo
 		}
 	case "swarm":
 		switch action {
+		case "deploy":
+			manifest := domain.String(p, "manifest")
+			if e := ValidateManifest("swarm", r, manifest); e != nil {
+				return empty, e
+			}
+			if !executor.ValidRef(r.Name) {
+				return empty, fmt.Errorf("invalid stack name")
+			}
+			cmd := a.command("stack", "deploy", "--compose-file", "-", r.Name)
+			cmd.Stdin = []byte(manifest)
+			return cmd, nil
+		case "status":
+			if r.Type == "docker_swarm_node" {
+				args = []string{"node", "inspect", text(r.Metadata, "ID")}
+			} else {
+				args = []string{"stack", "ps", r.Name, "--format", "{{json .}}"}
+			}
 		case "inspect":
 			args = []string{"service", "inspect", id}
 		case "logs":
@@ -396,6 +439,12 @@ func (a *CLI) Build(r domain.Resource, action string, p map[string]any) (executo
 	default:
 		return empty, fmt.Errorf("adapter unavailable")
 	}
+	if service := domain.String(r.Metadata, "service"); a.Provider == "dockercompose" && service != "" {
+		if !executor.ValidRef(service) {
+			return empty, fmt.Errorf("invalid compose service")
+		}
+		args = append(args, service)
+	}
 	return a.command(args...), nil
 }
 func ValidateManifest(provider string, r domain.Resource, manifest string) error {
@@ -410,6 +459,9 @@ func ValidateManifest(provider string, r domain.Resource, manifest string) error
 	if !json.Valid([]byte(manifest)) {
 		return fmt.Errorf("invalid manifest")
 	}
+	if e := validateWorkload(m); e != nil {
+		return e
+	}
 	if provider == "kubernetes" {
 		meta, _ := m["metadata"].(map[string]any)
 		kind := strings.ToLower(domain.String(m, "kind"))
@@ -419,6 +471,17 @@ func ValidateManifest(provider string, r domain.Resource, manifest string) error
 		if !domain.Contains([]string{"deployment", "statefulset"}, kind) {
 			return fmt.Errorf("unsupported manifest kind")
 		}
+	} else if provider == "swarm" {
+		services, ok := m["services"].(map[string]any)
+		if !ok || len(services) == 0 || len(services) > 100 {
+			return fmt.Errorf("stack requires 1..100 services")
+		}
+		for name, raw := range services {
+			service, ok := raw.(map[string]any)
+			if !ok || !executor.ValidRef(name) || domain.String(service, "image") == "" {
+				return fmt.Errorf("invalid stack service")
+			}
+		}
 	} else {
 		job, _ := m["Job"].(map[string]any)
 		if job == nil {
@@ -426,6 +489,17 @@ func ValidateManifest(provider string, r domain.Resource, manifest string) error
 		}
 		if domain.String(job, "ID") != r.ExternalID {
 			return fmt.Errorf("manifest job ID must match resource")
+		}
+		namespace := domain.String(job, "Namespace")
+		if namespace == "" {
+			namespace = "default"
+		}
+		targetNS := r.Namespace
+		if targetNS == "" {
+			targetNS = "default"
+		}
+		if namespace != targetNS {
+			return fmt.Errorf("manifest namespace must match job")
 		}
 	}
 	return nil

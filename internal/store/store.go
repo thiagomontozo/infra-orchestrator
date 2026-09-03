@@ -151,6 +151,17 @@ func (d *DB) SaveHost(ctx context.Context, h domain.Host) error {
 	_, e = d.Pool.Exec(ctx, "INSERT INTO hosts(id,document,secret_id) VALUES($1,$2,$3) ON CONFLICT(id) DO UPDATE SET document=$2,secret_id=$3,updated_at=now()", h.ID, b, h.SecretID)
 	return e
 }
+
+// ObserveHost updates collector-owned fields without overwriting an administrator's
+// concurrent credential, fingerprint, environment or enabled changes.
+func (d *DB) ObserveHost(ctx context.Context, h domain.Host) error {
+	b, e := json.Marshal(map[string]any{"facts": h.Facts, "state": h.State, "last_seen": h.LastSeen})
+	if e != nil {
+		return e
+	}
+	_, e = d.Pool.Exec(ctx, `UPDATE hosts SET document=document||$2::jsonb,updated_at=now() WHERE id=$1 AND secret_id=$3 AND document->>'hostname'=$4 AND document->>'fingerprint'=$5`, h.ID, b, h.SecretID, h.Hostname, h.Fingerprint)
+	return e
+}
 func (d *DB) Resource(ctx context.Context, id string) (r domain.Resource, e error) {
 	var b []byte
 	e = d.Pool.QueryRow(ctx, "SELECT document FROM resources WHERE id=$1", id).Scan(&b)
@@ -185,8 +196,14 @@ func (d *DB) UpsertResources(ctx context.Context, host, provider string, resourc
 		return e
 	}
 	defer tx.Rollback(ctx)
+	// Serialize inventories for a provider so a slower concurrent refresh cannot interleave writes.
+	if _, e = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", host+"/"+provider); e != nil {
+		return e
+	}
+	ids := make([]string, 0, len(resources))
 	for _, r := range resources {
 		r.ID = security.HashToken(host + "/" + provider + "/" + r.ExternalID)[:32]
+		ids = append(ids, r.ID)
 		r.HostID = host
 		r.Provider = provider
 		r.UpdatedAt = time.Now().UTC()
@@ -198,6 +215,10 @@ func (d *DB) UpsertResources(ctx context.Context, host, provider string, resourc
 		if _, e = tx.Exec(ctx, "INSERT INTO resources(id,host_id,provider,external_id,document) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET document=$5,updated_at=now()", r.ID, host, provider, r.ExternalID, b); e != nil {
 			return e
 		}
+	}
+	_, e = tx.Exec(ctx, `UPDATE resources SET document=jsonb_set(jsonb_set(jsonb_set(document,'{state}','"missing"'),'{health}','"unknown"'),'{capabilities}','[]'),updated_at=now() WHERE host_id=$1 AND provider=$2 AND NOT(id=ANY($3::text[]))`, host, provider, ids)
+	if e != nil {
+		return e
 	}
 	return tx.Commit(ctx)
 }
@@ -241,13 +262,18 @@ func AuditTx(ctx context.Context, tx pgx.Tx, a domain.Event) error {
 	if a.Metadata == nil {
 		a.Metadata = map[string]any{}
 	}
-	b, e := json.Marshal(a.Metadata)
+	// Normalize typed structs and maps before recursively removing sensitive fields.
+	raw, e := json.Marshal(a.Metadata)
 	if e != nil {
 		return e
 	}
-	b = []byte(security.Redact(string(b)))
-	if !json.Valid(b) {
-		b = []byte(`{"redacted":true}`)
+	var normalized any
+	if e = json.Unmarshal(raw, &normalized); e != nil {
+		return e
+	}
+	b, e := json.Marshal(security.SanitizeValue(normalized))
+	if e != nil {
+		return e
 	}
 	_, e = tx.Exec(ctx, "INSERT INTO audit(actor,actor_type,source_ip,request_id,host_id,resource_id,environment,action,decision,result,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)", a.Actor, a.ActorType, a.SourceIP, a.RequestID, a.HostID, a.ResourceID, a.Environment, a.Action, a.Decision, security.Redact(a.Result), b)
 	if e != nil {

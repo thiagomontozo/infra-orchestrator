@@ -1,0 +1,2 @@
+CREATE TABLE IF NOT EXISTS login_failures (key text PRIMARY KEY,failures integer NOT NULL DEFAULT 0,blocked_until timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS notification_deliveries (event_id bigint NOT NULL REFERENCES events(id),provider_id text NOT NULL,status text NOT NULL DEFAULT 'pending',attempts integer NOT NULL DEFAULT 0,next_attempt timestamptz NOT NULL DEFAULT now(),error text NOT NULL DEFAULT '',PRIMARY KEY(event_id,provider_id));
