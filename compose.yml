@@ -59,6 +59,7 @@ services:
     restart: unless-stopped
   worker:
     image: infra-orchestrator-backend:local
+    pull_policy: never
     entrypoint: [/app/worker]
     env_file: .env
     environment:
@@ -79,8 +80,8 @@ services:
       context: .
       dockerfile: Dockerfile.frontend
     image: infra-orchestrator-frontend:local
-    ports: ["127.0.0.1:${FRONTEND_PORT:-8080}:8080"]
-    networks: [control]
+    ports: ["${FRONTEND_BIND:-127.0.0.1}:${FRONTEND_PORT:-8080}:8080"]
+    networks: [control,edge]
     depends_on:
       server: {condition: service_healthy}
     read_only: true
@@ -96,3 +97,4 @@ networks:
   data: {internal: true}
   control: {internal: true}
   egress: {}
+  edge: {}
