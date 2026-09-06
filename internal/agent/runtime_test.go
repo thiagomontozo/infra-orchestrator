@@ -22,3 +22,38 @@ func TestPromptInjectionCannotEscalate(t *testing.T) {
 		t.Fatal("untrusted evidence boundary missing")
 	}
 }
+
+func TestToolScopeNamesTheOnlyPermittedTool(t *testing.T) {
+	all := []string{"restart_container", "restart_service", "restart_deployment"}
+	for _, c := range []struct{ provider, tool string }{
+		{"dockercompose", "restart_container"},
+		{"docker", "restart_container"},
+		{"systemd", "restart_service"},
+		{"kubernetes", "restart_deployment"},
+	} {
+		r := domain.Resource{ID: "res-1", Provider: c.provider}
+		scope := toolScope(r)
+		if !strings.Contains(scope, c.tool) || !strings.Contains(scope, r.ID) {
+			t.Fatalf("scope for %s must name %s and the resource: %s", c.provider, c.tool, scope)
+		}
+		for _, other := range all {
+			if other != c.tool && strings.Contains(scope, other) {
+				t.Fatalf("scope for %s also names %s", c.provider, other)
+			}
+		}
+		d := Diagnosis{Summary: "observed unhealthy", Risk: "medium", SuggestedTool: &ToolRequest{Name: c.tool, ResourceID: r.ID}}
+		if e := ValidateDiagnosis(d, r); e != nil {
+			t.Fatalf("scoped tool rejected for %s: %v", c.provider, e)
+		}
+	}
+	r := domain.Resource{ID: "res-2", Provider: "nomad"}
+	scope := toolScope(r)
+	if !strings.Contains(scope, "null") {
+		t.Fatalf("provider without a tool must ask for null: %s", scope)
+	}
+	for _, other := range all {
+		if strings.Contains(scope, other) {
+			t.Fatalf("scope for nomad must name no tool, got %s", scope)
+		}
+	}
+}

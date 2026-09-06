@@ -97,7 +97,8 @@ func (p *OpenAI) Complete(ctx context.Context, m []Message) (string, error) {
 	}
 	var res struct {
 		Choices []struct {
-			Message Message `json:"message"`
+			Message      Message `json:"message"`
+			FinishReason string  `json:"finish_reason"`
 		} `json:"choices"`
 	}
 	if e = json.Unmarshal(b, &res); e != nil {
@@ -105,6 +106,9 @@ func (p *OpenAI) Complete(ctx context.Context, m []Message) (string, error) {
 	}
 	if len(res.Choices) == 0 {
 		return "", fmt.Errorf("LLM returned no completion")
+	}
+	if res.Choices[0].FinishReason == "length" {
+		return "", fmt.Errorf("LLM response truncated at max_tokens (%d)", tokens)
 	}
 	return security.Redact(res.Choices[0].Message.Content), nil
 }

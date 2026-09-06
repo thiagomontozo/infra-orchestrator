@@ -12,6 +12,7 @@ import (
 	"github.com/thiagomontozo/infra-orchestrator/internal/secrets"
 	"github.com/thiagomontozo/infra-orchestrator/internal/security"
 	"github.com/thiagomontozo/infra-orchestrator/internal/store"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -82,13 +83,53 @@ func ValidateDiagnosis(d Diagnosis, resource domain.Resource) error {
 	if d.Summary == "" || len(d.Summary) > 10000 || !domain.Contains([]string{"low", "medium", "high"}, d.Risk) {
 		return fmt.Errorf("invalid diagnosis")
 	}
-	if d.SuggestedTool != nil {
-		action, providers, ok := toolAction(d.SuggestedTool.Name)
-		if !ok || action == "" || d.SuggestedTool.ResourceID != resource.ID || !domain.Contains(providers, resource.Provider) {
-			return fmt.Errorf("LLM suggested unauthorized or mismatched tool")
-		}
+	if d.SuggestedTool == nil {
+		return nil
+	}
+	action, providers, ok := toolAction(d.SuggestedTool.Name)
+	switch {
+	case !ok || action == "":
+		return fmt.Errorf("LLM suggested tool %q outside the structured allowlist", d.SuggestedTool.Name)
+	case d.SuggestedTool.ResourceID != resource.ID:
+		return fmt.Errorf("LLM suggested tool %q for a different resource", d.SuggestedTool.Name)
+	case !domain.Contains(providers, resource.Provider):
+		return fmt.Errorf("LLM suggested tool %q, which does not apply to provider %q", d.SuggestedTool.Name, resource.Provider)
 	}
 	return nil
+}
+
+// jsonPayload discards markdown fences and any prose around the object, keeping
+// the span from the first brace to the last one.
+func jsonPayload(s string) string {
+	s = strings.TrimSpace(s)
+	start := strings.Index(s, "{")
+	end := strings.LastIndex(s, "}")
+	if start < 0 || end < start {
+		return s
+	}
+	return s[start : end+1]
+}
+
+// parseDiagnosis decodes strictly first. An unknown field alone is tolerated on a
+// second pass, since ValidateDiagnosis remains the authority over the suggested
+// tool; every other decoding error stays fatal.
+func parseDiagnosis(raw string) (Diagnosis, bool, error) {
+	var d Diagnosis
+	payload := jsonPayload(raw)
+	dec := json.NewDecoder(strings.NewReader(payload))
+	dec.DisallowUnknownFields()
+	e := dec.Decode(&d)
+	if e == nil {
+		return d, false, nil
+	}
+	if !strings.Contains(e.Error(), "unknown field") {
+		return d, false, e
+	}
+	d = Diagnosis{}
+	if e = json.Unmarshal([]byte(payload), &d); e != nil {
+		return d, false, e
+	}
+	return d, true, nil
 }
 func (r *Runtime) Analyze(ctx context.Context, p domain.Principal, resourceID, providerID, question string) (domain.Object, error) {
 	var o domain.Object
@@ -135,16 +176,17 @@ func (r *Runtime) Analyze(ctx context.Context, p domain.Principal, resourceID, p
 	}
 	untrusted := security.Bounded(security.Redact(string(data)), budget, 150)
 	question = security.Bounded(security.Redact(question), 1000, 10)
-	raw, e := provider.Complete(ctx, []llm.Message{{Role: "system", Content: SystemPolicy}, {Role: "user", Content: "Diagnostic request: " + question}, {Role: "user", Content: "untrusted_data (read-only evidence):\n" + untrusted}})
+	raw, e := provider.Complete(ctx, []llm.Message{{Role: "system", Content: SystemPolicy}, {Role: "system", Content: toolScope(resource)}, {Role: "user", Content: "Diagnostic request: " + question}, {Role: "user", Content: "untrusted_data (read-only evidence):\n" + untrusted}})
 	if e != nil {
 		return o, e
 	}
-	raw = strings.TrimSpace(raw)
-	var diagnosis Diagnosis
-	dec := json.NewDecoder(strings.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if e = dec.Decode(&diagnosis); e != nil {
-		return o, fmt.Errorf("provider did not return the required diagnosis schema")
+	diagnosis, tolerated, e := parseDiagnosis(raw)
+	if e != nil {
+		slog.Error("diagnosis schema rejected", "resource", resource.ID, "provider_id", providerID, "error", e, "response", security.Bounded(security.Redact(raw), 2000, 40))
+		return o, fmt.Errorf("provider did not return the required diagnosis schema: %v", e)
+	}
+	if tolerated {
+		slog.Warn("diagnosis carried unknown fields", "resource", resource.ID, "provider_id", providerID)
 	}
 	if e = ValidateDiagnosis(diagnosis, resource); e != nil {
 		_ = r.DB.Audit(ctx, domain.Event{Actor: p.User.ID, ActorType: "agent", Action: "agent.tool_denied", ResourceID: resource.ID, Environment: host.Environment, Decision: "deny", Result: e.Error()})
@@ -168,16 +210,44 @@ func (r *Runtime) Analyze(ctx context.Context, p domain.Principal, resourceID, p
 	}
 	return o, nil
 }
+
+// toolProviders is the single source of truth for which resource providers each
+// structured tool covers. toolAction and allowedTool both read it so validation
+// and the prompt cannot drift apart.
+var toolProviders = map[string][]string{
+	"restart_container":  {"docker", "podman", "dockercompose", "podmancompose"},
+	"restart_service":    {"systemd", "supervisor", "pm2"},
+	"restart_deployment": {"kubernetes", "kubernetes-api"},
+}
+
 func toolAction(name string) (string, []string, bool) {
-	switch name {
-	case "restart_container":
-		return "restart", []string{"docker", "podman"}, true
-	case "restart_service":
-		return "restart", []string{"systemd", "supervisor", "pm2"}, true
-	case "restart_deployment":
-		return "restart", []string{"kubernetes", "kubernetes-api"}, true
+	providers, ok := toolProviders[name]
+	if !ok {
+		return "", nil, false
 	}
-	return "", nil, false
+	return "restart", providers, true
+}
+
+// allowedTool returns the only tool name valid for a provider, or "" when none
+// covers it. A provider appears in exactly one list, so the answer is unambiguous.
+func allowedTool(provider string) string {
+	for name, providers := range toolProviders {
+		if domain.Contains(providers, provider) {
+			return name
+		}
+	}
+	return ""
+}
+
+// toolScope states, on the trusted channel, which resource is under analysis and
+// the single tool name accepted for it, so the model no longer has to infer the
+// name or copy the id out of the evidence block.
+func toolScope(r domain.Resource) string {
+	name := allowedTool(r.Provider)
+	if name == "" {
+		return "Scope: the resource under analysis has resource_id " + r.ID + ". No structured tool covers its provider, so suggested_tool must be null."
+	}
+	return "Scope: the resource under analysis has resource_id " + r.ID + ". If you suggest a tool, suggested_tool.name must be exactly " + name + " and suggested_tool.resource_id must be exactly " + r.ID + ". Any other tool name is rejected."
 }
 func (r *Runtime) Tool(ctx context.Context, p domain.Principal, name, resourceID, reason, recommendationID string) (any, error) {
 	action, providers, ok := toolAction(name)
