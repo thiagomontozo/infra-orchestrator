@@ -3,6 +3,7 @@ module github.com/thiagomontozo/infra-orchestrator
 go 1.26.6
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/go-ldap/ldap/v3 v3.4.14
 	github.com/jackc/pgx/v5 v5.10.0

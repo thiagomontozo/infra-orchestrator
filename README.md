@@ -37,6 +37,7 @@ Acesse `http://localhost:8080` em desenvolvimento. Não há credencial padrão. 
 3. **Criar container/microsserviço:** selecionar host Docker já descoberto, imagem, registry, portas, variáveis e limites. O worker baixa a imagem usando a API do Docker sobre SSH, cria e inicia o container. Credenciais de registry não são gravadas em `docker login` remoto.
 4. **Kubernetes:** usar `kubectl` já configurado no host ou cadastrar kubeconfig incorporando CA/token/certificado. Plugins `exec` e TLS inseguro são rejeitados.
 5. **IA:** cadastrar provedor compatível com `/v1/models` e `/v1/chat/completions`, configurar CIDRs de saída, testar, selecionar um recurso e analisar. A resposta distingue fatos, hipóteses e ações. Tools seguem RBAC/policy/aprovação.
+6. **Console:** abrir a aba Console de um container ou serviço compose para um shell interativo com PTY. Exige `container.exec`, concedida a `OPERATOR` e `ADMIN` em todos os ambientes e **sem aprovação de segunda pessoa**, inclusive em produção. Comandos digitados não entram na auditoria. Ver [Console](docs/CONSOLE.md).
 
 ## Segurança por arquitetura
 
@@ -102,6 +103,7 @@ Integrações e navegador exigem variáveis próprias, conforme [TESTING](docs/T
 - [SSH](docs/SSH.md), [Bastion](docs/BASTION.md), [Secrets](docs/SECRETS.md)
 - [Adapters](docs/ADAPTERS.md), [Criação de serviços](docs/PROVISIONING.md), [Kubernetes](docs/KUBERNETES.md)
 - [Operações](docs/OPERATIONS.md), [Deployments](docs/DEPLOYMENTS.md), [Agentes](docs/AGENT.md)
+- [Console interativo](docs/CONSOLE.md)
 - [API](docs/API.md), [OpenAPI](docs/openapi.yaml), [Instalação](docs/DEPLOYMENT.md)
 - [Relatório final](docs/FINAL_REPORT.md), [Limitações](docs/STATUS.md)
 

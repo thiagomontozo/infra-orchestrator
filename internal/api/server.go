@@ -190,6 +190,7 @@ func (s *Server) Handler() http.Handler {
 	s.route("GET /api/v1/resources", s.resources)
 	s.route("GET /api/v1/resources/{id}", s.resource)
 	s.route("GET /api/v1/resources/{id}/logs", s.logs)
+	s.route("GET /api/v1/resources/{id}/console", s.console)
 	s.route("GET /api/v1/resources/{id}/read", s.readResource)
 	s.route("GET /api/v1/operations", s.listOperations)
 	s.route("POST /api/v1/operations", s.submitOperation)

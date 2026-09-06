@@ -14,7 +14,7 @@ func Permissions(role string) []string {
 	case "ADMIN":
 		return []string{"*"}
 	case "OPERATOR":
-		p = append(p, "container.create", "container.start", "container.stop", "container.restart", "container.pause", "container.unpause", "container.recreate", "container.up", "container.down", "service.start", "service.stop", "service.restart", "service.reload", "kubernetes.scale", "kubernetes.restart", "kubernetes.delete", "kubernetes.rollback", "kubernetes.deploy", "nomad.run", "nomad.stop", "nomad.restart", "swarm.scale", "swarm.restart", "deployment.execute", "deployment.rollback", "schedule.manage", "incident.manage")
+		p = append(p, "container.create", "container.start", "container.stop", "container.restart", "container.pause", "container.unpause", "container.recreate", "container.up", "container.down", "container.exec", "service.start", "service.stop", "service.restart", "service.reload", "kubernetes.scale", "kubernetes.restart", "kubernetes.delete", "kubernetes.rollback", "kubernetes.deploy", "nomad.run", "nomad.stop", "nomad.restart", "swarm.scale", "swarm.restart", "deployment.execute", "deployment.rollback", "schedule.manage", "incident.manage")
 	case "APPROVER":
 		p = append(p, "operation.approve", "audit.read")
 	case "AUDITOR":

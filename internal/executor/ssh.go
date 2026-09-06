@@ -281,3 +281,104 @@ func (s *SSH) Probe(ctx context.Context, h domain.Host) (string, error) {
 	}
 	return "", e
 }
+
+// Terminal carries the interactive ends of a PTY session. Resize delivers
+// {rows, cols} updates for the lifetime of the session; the caller closes it.
+type Terminal struct {
+	Stdin       io.Reader
+	Stdout      io.Writer
+	Rows, Cols  int
+	Resize      <-chan [2]int
+	MaxDuration time.Duration
+}
+
+func terminalSize(rows, cols int) (int, int) {
+	if rows < 1 || rows > 300 {
+		rows = 24
+	}
+	if cols < 1 || cols > 500 {
+		cols = 80
+	}
+	return rows, cols
+}
+
+// Shell opens an interactive PTY session over the same SSH path as every other
+// operation. The command still goes through Command.Render, so the host binary
+// allowlist applies here too: this opens no new way to run things on the host.
+// It carries its own time ceiling because CommandTimeout, sized for one-shot
+// commands, would cut a working session short.
+func (s *SSH) Shell(ctx context.Context, h domain.Host, cmd Command, t Terminal) error {
+	ctx, span := otel.Tracer("executor").Start(ctx, "ssh.shell")
+	defer span.End()
+	command, e := cmd.Render()
+	if e != nil {
+		return e
+	}
+	if !h.Enabled {
+		return fmt.Errorf("host disabled")
+	}
+	limit := t.MaxDuration
+	if limit <= 0 || limit > 8*time.Hour {
+		limit = 30 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	select {
+	case s.Slots <- struct{}{}:
+		defer func() { <-s.Slots }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	conn, e := s.connect(ctx, h)
+	if e != nil {
+		return e
+	}
+	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+	session, e := conn.client.NewSession()
+	if e != nil {
+		return e
+	}
+	defer session.Close()
+	rows, cols := terminalSize(t.Rows, t.Cols)
+	if e = session.RequestPty("xterm-256color", rows, cols, ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 38400, ssh.TTY_OP_OSPEED: 38400}); e != nil {
+		return e
+	}
+	stdin, e := session.StdinPipe()
+	if e != nil {
+		return e
+	}
+	// A PTY merges both streams onto the same descriptor; keeping them apart
+	// here would interleave escape sequences and corrupt the screen.
+	session.Stdout = t.Stdout
+	session.Stderr = t.Stdout
+	if e = session.Start(command); e != nil {
+		return e
+	}
+	go func() {
+		defer stdin.Close()
+		if t.Stdin != nil {
+			_, _ = io.Copy(stdin, t.Stdin)
+		}
+	}()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case size, ok := <-t.Resize:
+				if !ok {
+					return
+				}
+				r, c := terminalSize(size[0], size[1])
+				_ = session.WindowChange(r, c)
+			}
+		}
+	}()
+	e = session.Wait()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return e
+}
