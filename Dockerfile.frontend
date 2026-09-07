@@ -1,4 +1,4 @@
-FROM node:24-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /src
 COPY web/package.json web/package-lock.json ./
 RUN --mount=type=secret,id=extra_ca if [ -s /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca; fi; npm ci --ignore-scripts
