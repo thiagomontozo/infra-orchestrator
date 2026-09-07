@@ -5,6 +5,9 @@ RUN --mount=type=secret,id=extra_ca if [ -s /run/secrets/extra_ca ]; then export
 COPY web/ ./
 RUN npm run build
 FROM nginxinc/nginx-unprivileged:1.30-alpine
+USER root
+RUN --mount=type=secret,id=extra_ca if [ -s /run/secrets/extra_ca ]; then cat /run/secrets/extra_ca >> /etc/ssl/certs/ca-certificates.crt; fi; apk upgrade --no-cache
+USER 101
 COPY deployments/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /src/dist /usr/share/nginx/html
 EXPOSE 8080
