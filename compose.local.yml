@@ -1,0 +1,5 @@
+# Override local: publica o backend e mantem o PUBLIC_ORIGIN vindo do .env.
+# Nao use junto com compose.dev.yml, que sobrescreve PUBLIC_ORIGIN para localhost.
+services:
+  server:
+    ports: ["${BACKEND_BIND:-0.0.0.0}:${BACKEND_PORT:-8029}:8080"]

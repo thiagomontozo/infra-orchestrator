@@ -30,6 +30,8 @@ docker compose exec server /app/infra-orchestrator admin create --username seu-a
 
 Acesse `http://localhost:8080` em desenvolvimento. Não há credencial padrão. A senha inicial é solicitada sem eco; `--password-stdin` atende automações. Em produção, use HTTPS com proxy reverso e `PUBLIC_ORIGIN` correspondente. A configuração de produção rejeita origem HTTP.
 
+Dentro da interface, o botão de ajuda ao lado da identificação do usuário — ou a tecla F1 — abre a central de ajuda, com o funcionamento e a configuração de cada módulo e um índice pesquisável.
+
 ## Fluxos principais
 
 1. **Hosts:** adicionar endereço, usuário não root, chave e ambiente; obter fingerprint; comparar por um canal confiável; confirmar; salvar; testar SSH; descobrir.

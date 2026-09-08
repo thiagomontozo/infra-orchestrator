@@ -1,7 +1,8 @@
-# Console interativo de container
+# Console interativo
 
-A aba **Console** da tela de recurso abre um shell dentro do container, com PTY
-real: `vim`, `htop`, `less` e `Ctrl+C` funcionam como funcionariam num SSH direto.
+O console anexa um shell dentro de um container, pela mesma conexão SSH que o
+orquestrador já usa para as demais operações. Ele fica na aba **Console** do painel
+de um recurso.
 
 ## Postura de segurança
 
@@ -11,121 +12,150 @@ explicitamente e registrada aqui:
 - A permissão `container.exec` é concedida a `OPERATOR` e `ADMIN` **em todos os
   ambientes, inclusive `production`**, e **sem aprovação de segunda pessoa** — ao
   contrário das operações de mudança, que passam por `operations.Engine`.
-- O restante do projeto mantém a postura anterior: a política do agente continua
-  afirmando que a IA não tem shell nem execução direta, e a allowlist de binários
-  em `executor.Command.Render` continua valendo — inclusive para o console.
+- A allowlist de binários em `executor.Command.Render` continua valendo no host:
+  o console e o agente chegam ao container por `docker exec`, um programa já
+  aceito, e nenhum caminho novo de execução no host é aberto. Dentro do
+  container, porém, o comando é livre — é essa a fronteira que muda.
+- O agente deixa de ser apenas consultivo neste escopo: com `llm.use` e
+  `container.exec`, o modelo executa comandos dentro do container aberto. O risco
+  correspondente está em [AGENT_SECURITY.md](AGENT_SECURITY.md).
 
-## Caminho da requisição
+## Alcance
 
-```
-navegador --(WebSocket)--> nginx --(upgrade)--> server --(SSH + PTY)--> host --> docker exec
-```
+Só recursos com container próprio aceitam console:
+
+| Provider | Tipo | Alvo |
+| --- | --- | --- |
+| `docker`, `podman` | `docker_container`, `podman_container` | `external_id` do recurso |
+| `dockercompose`, `podmancompose` | `docker_compose_service` | `metadata.container` |
+
+Um projeto compose (`docker_compose_project`) não tem container próprio. A aba mostra
+os serviços do projeto e o console abre no serviço escolhido.
+
+O comando executado é `docker exec --interactive --tty <container> <shell>`, com o
+shell restrito a `sh` ou `bash`. O binário continua passando pela allowlist de
+`executor.Command.Render`, a mesma que protege todas as outras operações — o console
+não abre um caminho novo para executar programas no host.
+
+## Autorização
+
+- Permissão `container.exec`, concedida a `OPERATOR` e `ADMIN`. Papéis de leitura não
+  enxergam a aba e a rota recusa a conexão.
+- `resource.read` no ambiente do host, como em qualquer recurso.
+- Liberado em todos os ambientes, inclusive `production`. Diferente de uma operação de
+  escrita, o console **não** passa por aprovação de segunda pessoa: quem tem
+  `container.exec` executa comandos arbitrários dentro do container imediatamente.
+- Limite de 20 sessões por usuário por hora e teto de 30 minutos por sessão.
+
+## Transporte
 
 `GET /api/v1/resources/{id}/console` faz upgrade para WebSocket.
 
-### Protocolo
+- Frames binários carregam a entrada do teclado e a saída do terminal.
+- Frames de texto carregam apenas `{"rows":n,"cols":n}` para redimensionar o PTY.
+- O servidor envia ping a cada 25s para o proxy não derrubar sessões ociosas.
 
-| Frame | Sentido | Conteúdo |
-| --- | --- | --- |
-| binário | cliente → servidor | teclado |
-| binário | servidor → cliente | saída do terminal |
-| texto | cliente → servidor | `{"rows":n,"cols":n}` |
+O handshake é um `GET` e portanto chega com o cookie de sessão mas sem o header
+`X-CSRF-Token` exigido nas rotas de escrita. A defesa contra outro site abrir um shell
+com o cookie do usuário é a checagem de `Origin` contra `PUBLIC_ORIGIN`, obrigatória
+nessa rota. O nginx precisa repassar `Upgrade`/`Connection` — já configurado em
+`deployments/nginx.conf`.
 
-O servidor envia ping a cada 25s para o proxy não derrubar uma sessão ociosa.
+## Auditoria
 
-## Camadas de verificação
+Duas entradas por sessão:
 
-Todas acontecem **antes** do upgrade. Depois dele a resposta está sequestrada e a
-única coisa que o handler ainda consegue fazer é fechar o socket.
+- `resource.console` na abertura, com recurso, host, ambiente, container e shell.
+- `resource.console_ended` no fim, com duração em segundos e o motivo do encerramento.
 
-1. **Autenticação** — o wrapper `Server.route` já exige sessão válida, MFA
-   registrado e senha não expirada.
-2. **`resource.read`** no ambiente do host, via `visibleResource`.
-3. **`container.exec`** no ambiente do host, via `rbac.Permission(provider,"exec")`.
-4. **`Origin` idêntico a `PUBLIC_ORIGIN`.** Ver abaixo — é a defesa central.
-5. **`adapters.ConsoleCommand`** resolve o alvo e recusa o que não for um
-   container único.
-6. **Orçamento** de 20 sessões por usuário por hora (`auth_limits`, chave
-   `console:<user_id>`).
-7. **`executor.Command.Render`** aplica a allowlist de binários do host.
+**O conteúdo da sessão não é gravado.** A auditoria registra que houve um shell, por
+quem e por quanto tempo, não os comandos digitados. Se o requisito for gravar comandos,
+isso exige um registrador no meio do stream e ainda não existe.
 
-### Por que a checagem de `Origin` é obrigatória
+A saída do terminal também não passa por `security.Redact`: sequências de escape são o
+que faz o terminal funcionar, e reescrevê-las corromperia a tela. Segredos exibidos
+dentro do container aparecem na tela do operador como apareceriam num SSH direto.
 
-Um upgrade de WebSocket é um `GET`, e `auth.Authenticate` **não** valida CSRF nem
-`Origin` em `GET`. O handshake, portanto, chega com o cookie de sessão e sem
-`X-CSRF-Token`. A comparação explícita de `Origin` com `s.Config.Origin` no
-handler é a única coisa entre o cookie do usuário e um shell aberto por outro
-site.
+## IA no mesmo container
 
-Por isso `websocket.Accept` roda com `InsecureSkipVerify: true`: a checagem
-própria da biblioteca compara com o header `Host` e rejeitaria a origem que chega
-pelo proxy. A verificação não foi removida, foi substituída por uma mais estrita.
+Abaixo do terminal, quem tem `llm.use` além de `container.exec` conversa com o agente
+sobre o container aberto. Nos dois modos o backend executa
+`docker exec <container> sh -c <comando>` no **mesmo container do console** e devolve a
+saída ao modelo como evidência.
 
-**Remover a comparação de `Origin` reintroduz cross-site WebSocket hijacking.**
+**Chat** (`POST /api/v1/agents/chat`) é o modo normal: você manda uma mensagem, a IA roda
+até 6 comandos para responder e escreve em prosa o que observou, o que concluiu e o que
+mudou. A conversa continua — a próxima mensagem chega com o histórico. Diferente do modo
+autônomo, aqui a IA **pode alterar coisas dentro do container** quando você pede uma
+correção, e a política exige que ela diga exatamente o que mudou. Reiniciar o container em
+si continua fora do alcance dela: isso é operação, e passa por RBAC, política e aprovação.
 
-## Alvos aceitos
+**Diagnóstico estruturado** (`POST /api/v1/agents/debug`) é o modo autônomo: uma pergunta,
+até 8 passos de investigação sem sua intervenção, e um diagnóstico validado no schema —
+que pode trazer um `suggested_tool` de reinício para você solicitar com aprovação na aba
+de IA. Use quando quiser o laudo, não a conversa.
 
-| Provider | Tipo | Container |
-| --- | --- | --- |
-| `docker`, `podman` | `docker_container`, `podman_container` | `external_id` |
-| `dockercompose`, `podmancompose` | `docker_compose_service` | `metadata.container` |
+### Acompanhando ao vivo
 
-Um **projeto** compose não tem container próprio: a aba lista os serviços do
-mesmo host cujo `metadata.project` corresponde ao `external_id` do projeto e pede
-que um seja escolhido. Kubernetes, systemd, nomad, swarm, supervisor e pm2 são
-recusados — não há um container único ao qual anexar.
+O painel usa `POST /api/v1/agents/chat/stream`, que responde em Server-Sent Events e
+mostra a troca acontecendo: o raciocínio do modelo enquanto ele escreve, cada comando no
+momento em que começa a rodar, a saída quando chega, e a resposta sendo redigida. Os
+eventos são `open`, `step`, `reasoning`, `thought`, `command`, `result` e, ao final,
+`done` com a conversa gravada — ou `error`. Como o stream abre com HTTP 200 antes de a
+conversa começar, uma negativa de permissão chega como evento `error`, não como 403.
 
-O shell é restrito a `sh` ou `bash`. O identificador do container passa por
-`executor.ValidRef` antes de virar argumento.
+O `thought` é um campo do JSON que o modelo devolve, extraído incrementalmente de um
+documento ainda incompleto. Já `reasoning` é o canal separado que alguns modelos emitem
+(`reasoning_content`), repassado quando existe. `POST /api/v1/agents/chat` continua
+disponível e devolve a mesma troca em JSON, para uso por script. Um provedor que não
+suporte `stream: true` não quebra o chat: se nada chegou ao usuário ainda, o backend
+refaz a chamada em modo bufferizado e entrega a resposta de uma vez.
 
-## Limites
+### Conversas
 
-- 30 minutos por sessão, aplicados no `context` e no `executor.Terminal`.
-- 20 sessões por usuário por hora.
-- 64 KB por frame de entrada.
-- `CommandTimeout` (90s) **não** se aplica: ele existe para comandos de uma
-  tacada e cortaria uma sessão em uso.
+Cada conversa é um objeto `conversations`, guardado no servidor com as mensagens e, em
+cada resposta da IA, os comandos que ela rodou com saída e status. O painel reabre a
+conversa mais recente daquele container ao ser aberto de novo; **Nova conversa** começa
+outra. `GET /api/v1/agents/chat?resource_id=` lista as suas.
 
-## Limitações conhecidas, todas deliberadas
+Conversas são **privadas de quem as abriu** — nem ADMIN lê a conversa alheia por essa
+rota. Isso não esconde nada de auditoria: todo comando executado está em `agent.exec`,
+com autor, container, comando, status e duração. O que fica privado é o texto que a
+pessoa escreveu, não o que a máquina fez.
 
-1. **O botão "Colar" exige HTTPS.** `navigator.clipboard` só existe em contexto
-   seguro. Servida em HTTP, a UI captura a falha e orienta usar `Ctrl+V`, que
-   passa pelo tratamento nativo do xterm e funciona sempre. Não existe outra API
-   de leitura de área de transferência em contexto inseguro — publicar a UI em
-   HTTPS é a única correção. Copiar tem fallback via `document.execCommand` e
-   funciona nos dois casos.
-2. **A sessão não é gravada.** A auditoria registra `resource.console` na abertura
-   (recurso, host, ambiente, container, shell) e `resource.console_ended` no fim
-   (duração, motivo). **Os comandos digitados não entram na auditoria.** Gravá-los
-   exigiria um registrador no meio do stream.
-3. **A saída não passa por `security.Redact`.** Sequências de escape são o que faz
-   o terminal funcionar e reescrevê-las corromperia a tela. Segredos exibidos
-   dentro do container aparecem como apareceriam num SSH direto.
-4. **Sem aprovação de segunda pessoa, inclusive em produção.**
+Limites: 60 mensagens por usuário por hora, 4000 caracteres por mensagem, 60 mensagens
+guardadas por conversa (as mais antigas caem). Para caber no contexto, o histórico
+reenviado ao modelo traz a saída completa só do último comando; os anteriores viram uma
+linha dizendo que rodaram e como terminaram.
 
-## nginx
+O comando é livre — não há allowlist de programas dentro do container. A autorização é
+verificada uma vez, no início: `llm.use`, `resource.read` e `container.exec` no ambiente
+do host, exatamente o que o console interativo já exige. O script chega ao runtime como
+um único argumento citado, então o que ele escreve vale dentro do container e nunca na
+linha de comando do host.
 
-O upgrade exige `map $http_upgrade $connection_upgrade` no contexto `http` — o
-arquivo é incluído a partir de `conf.d/`, então o `map` no topo é válido — mais
-os headers `Upgrade`/`Connection` e timeouts de 3600s em `location /api/`.
+Limites de execução, comuns aos dois modos: 60 comandos por usuário por hora, mais 5
+sessões autônomas por hora. Cada comando tem o timeout de `SSH_COMMAND_TIMEOUT`, e a
+saída entregue ao modelo é truncada em 6000 bytes/200 linhas e passa por
+`security.Redact`. Uma falha de transporte encerra a sessão em vez de virar evidência; um
+exit code diferente de zero é resultado normal e segue para o modelo.
 
-## Diagnóstico
+Diferente do console, **os comandos do agente são gravados**: cada um gera um evento
+`agent.exec` na auditoria com container, comando, status e duração. A sessão autônoma
+guarda o `transcript` no objeto `recommendations` junto do diagnóstico e fecha com
+`agent.debug`; o chat guarda os comandos dentro da própria mensagem da IA e registra
+`agent.chat` por troca.
 
-| Sintoma | Causa provável |
-| --- | --- |
-| 401 no upgrade | `Origin` diferente de `PUBLIC_ORIGIN` |
-| 403 no upgrade | papel sem `container.exec` |
-| 429 no upgrade | orçamento de 20 sessões/hora esgotado |
-| 400 no upgrade | recurso sem container anexável, ou shell fora da lista |
-| conecta e cai em ~30s | `ReadTimeout` do `http.Server` — os deadlines são zerados com `http.NewResponseController` |
-| conecta e cai ociosa | proxy sem os headers de upgrade ou com timeout curto |
+O risco que isso cria está em [AGENT_SECURITY.md](AGENT_SECURITY.md): uma linha de log
+ou de saída pedindo para executar algo é evidência não confiável, mas quem escolhe o
+próximo comando é o modelo, e não existe mais uma allowlist estrutural atrás dele.
 
-```sh
-docker compose logs server --since 10m | grep -i console
-```
+## Copiar e colar
 
-```sql
-select timestamp, actor, action, metadata from audit
-where action in ('resource.console','resource.console_ended')
-order by id desc limit 10;
-```
+- **Copiar**: botão copia a seleção ou, sem seleção, todo o buffer visível. Atalho
+  `Ctrl+Shift+C`.
+- **Colar**: `Ctrl+V` funciona sempre (o navegador entrega o evento de colagem direto ao
+  terminal). O botão **Colar** e o atalho `Ctrl+Shift+V` usam a API de área de
+  transferência, que os navegadores só liberam em contexto seguro — servindo a UI por
+  HTTP puro, o botão avisa e o `Ctrl+V` segue valendo. Publicar a UI em HTTPS libera os
+  dois caminhos.

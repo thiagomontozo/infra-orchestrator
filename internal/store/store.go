@@ -77,11 +77,11 @@ func (d *DB) Migrate(ctx context.Context) error {
 	return tx.Commit(ctx)
 }
 
-const userCols = "id,username,email,password_hash,role,enabled,environments,mfa_required,mfa_secret,mfa_last,force_password,service,last_login"
+const userCols = "id,username,email,password_hash,role,enabled,environments,mfa_required,mfa_secret,mfa_last,force_password,service,last_login,display_name,office_location"
 
 func scanUser(row pgx.Row) (u domain.User, e error) {
 	var env []byte
-	e = row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.Enabled, &env, &u.MFARequired, &u.MFASecret, &u.MFALast, &u.ForcePassword, &u.Service, &u.LastLogin)
+	e = row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.Enabled, &env, &u.MFARequired, &u.MFASecret, &u.MFALast, &u.ForcePassword, &u.Service, &u.LastLogin, &u.DisplayName, &u.OfficeLocation)
 	if e == nil {
 		e = json.Unmarshal(env, &u.Environments)
 	}
@@ -93,6 +93,15 @@ func (d *DB) User(ctx context.Context, id string) (domain.User, error) {
 }
 func (d *DB) UserLogin(ctx context.Context, login string) (domain.User, error) {
 	return scanUser(d.Pool.QueryRow(ctx, "SELECT "+userCols+" FROM users WHERE lower(username)=lower($1) OR lower(email)=lower($1)", login))
+}
+
+// UserPhoto returns the directory thumbnail, kept out of userCols so listings stay small.
+func (d *DB) UserPhoto(ctx context.Context, id string) string {
+	var photo string
+	if e := d.Pool.QueryRow(ctx, "SELECT photo FROM users WHERE id=$1", id).Scan(&photo); e != nil {
+		return ""
+	}
+	return photo
 }
 func (d *DB) Users(ctx context.Context) ([]domain.User, error) {
 	rows, e := d.Pool.Query(ctx, "SELECT "+userCols+" FROM users ORDER BY username LIMIT 1000")

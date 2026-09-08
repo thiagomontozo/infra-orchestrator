@@ -30,7 +30,7 @@ Esta versão contém implementação executável, mas não deve ser tratada como
 | Notificações | Webhook/SMTP STARTTLS/Slack/Teams, fila de entrega | Sem envio real a destinatários externos; entrega pelo menos uma vez |
 | Incidentes | CRUD/status/timeline descritiva/referências/auditoria | Correlação automática e timeline navegável completa pendentes |
 | LLM | Models/chat, timeout, limites e diagnóstico estruturado | Protocolo com servidor de teste; nenhum modelo real certificado |
-| Agentes | Advisory/assisted/automação explícita por policy, três tools de restart | Catálogo completo de consultas estruturadas ainda não exposto |
+| Agentes | Advisory/assisted/automação explícita por policy, três tools de restart, depuração autônoma e chat com comandos livres no container | Catálogo completo de consultas estruturadas ainda não exposto; em DEBUG/CHAT não há allowlist de comandos nem confirmação por comando; a redação do texto em streaming é por retenção de gatilho, não garantia |
 | Prompt injection | Dados não confiáveis separados, validação de tools/alvo e policy | Sanitização textual não é DLP universal; regras customizáveis por tenant pendentes |
 | Distribuição | Server/worker, PostgreSQL locks, Redis, NATS outbox | Compose não fornece HA do banco/bus; failover de datacenter não testado |
 | Auditoria | Eventos persistidos, trigger append-only, operações/aprovações transacionais | Algumas alterações administrativas e seu audit usam transações separadas |

@@ -10,3 +10,27 @@ export function csrf(){return document.cookie.split('; ').find(c=>c.startsWith('
 export function uuid(){if(typeof crypto.randomUUID==='function')return crypto.randomUUID();const b=new Uint8Array(16);crypto.getRandomValues(b);b[6]=(b[6]&0x0f)|0x40;b[8]=(b[8]&0x3f)|0x80;const h=Array.from(b,x=>x.toString(16).padStart(2,'0')).join('');return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`}
 export async function api<T=any>(path:string,method='GET',body?:unknown):Promise<T>{const res=await fetch('/api/v1'+path,{method,credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf(),...(method==='POST'?{'Idempotency-Key':uuid()}: {})},...(body===undefined?{}:{body:JSON.stringify(body)})});const data=await res.json().catch(()=>({error:'Resposta inválida do servidor'}));if(!res.ok)throw new Error(data.error||`HTTP ${res.status}`);return data as T}
 export function when(s?:string){return s?new Date(s).toLocaleString('pt-BR',{dateStyle:'short',timeStyle:'short'}):'—'}
+
+export type StreamEvent={event:string;data:any};
+/** POSTs and reads a server-sent stream. EventSource only speaks GET and cannot carry the
+ *  CSRF header, so the stream is read off the response body and split on SSE frames. */
+export async function stream(path:string,body:unknown,onEvent:(e:StreamEvent)=>void,signal?:AbortSignal){
+ const res=await fetch('/api/v1'+path,{method:'POST',credentials:'same-origin',signal,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf(),'Idempotency-Key':uuid(),Accept:'text/event-stream'},body:JSON.stringify(body)});
+ if(!res.ok||!res.body){const d=await res.json().catch(()=>({error:`HTTP ${res.status}`}));throw new Error(d.error||`HTTP ${res.status}`)}
+ const reader=res.body.getReader(),decoder=new TextDecoder();
+ let buffer='';
+ for(;;){
+  const{done,value}=await reader.read();
+  if(done)break;
+  buffer+=decoder.decode(value,{stream:true});
+  for(let i=buffer.indexOf('\n\n');i>=0;i=buffer.indexOf('\n\n')){
+   const frame=buffer.slice(0,i);buffer=buffer.slice(i+2);
+   let event='message',data='';
+   for(const line of frame.split('\n')){
+    if(line.startsWith('event:'))event=line.slice(6).trim();
+    else if(line.startsWith('data:'))data+=line.slice(5).trim();
+   }
+   if(data)try{onEvent({event,data:JSON.parse(data)})}catch{/* ignore a frame we cannot parse */}
+  }
+ }
+}

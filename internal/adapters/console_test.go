@@ -8,58 +8,73 @@ import (
 
 func TestConsoleCommandOnlyAttachesToContainers(t *testing.T) {
 	container := domain.Resource{Provider: "docker", Type: "docker_container", ExternalID: "abc123"}
-	cmd, target, e := ConsoleCommand(container, "sh")
-	if e != nil {
-		t.Fatalf("docker container refused: %v", e)
+	cmd, e := ConsoleCommand(container, "")
+	if e != nil || cmd.Program != "docker" || strings.Join(cmd.Args, " ") != "exec --interactive --tty abc123 sh" {
+		t.Fatalf("container console built wrong: %v %v", cmd, e)
 	}
-	if target.Container != "abc123" || target.Shell != "sh" || cmd.Program != "docker" {
-		t.Fatalf("unexpected target %+v for %+v", target, cmd)
+	if _, e = cmd.Render(); e != nil {
+		t.Fatalf("console command rejected by the executable allowlist: %v", e)
 	}
-	rendered, e := cmd.Render()
-	if e != nil {
-		t.Fatalf("command does not pass the binary allowlist: %v", e)
+	service := domain.Resource{Provider: "dockercompose", Type: "docker_compose_service", ExternalID: "app/api", Metadata: map[string]any{"container": "c8597c5a76a6"}}
+	cmd, e = ConsoleCommand(service, "bash")
+	if e != nil || strings.Join(cmd.Args, " ") != "exec --interactive --tty c8597c5a76a6 bash" {
+		t.Fatalf("compose service console built wrong: %v %v", cmd, e)
 	}
-	// Render quotes every argument, so the shape is: docker 'exec' '--tty' ...
-	for _, want := range []string{"docker ", "'exec'", "'--interactive'", "'--tty'", "'abc123'", "'sh'"} {
-		if !strings.Contains(rendered, want) {
-			t.Fatalf("rendered command missing %s: %s", want, rendered)
-		}
-	}
-
-	service := domain.Resource{Provider: "dockercompose", Type: "docker_compose_service", ExternalID: "app/api", Metadata: map[string]any{"container": "339d361e351c"}}
-	if _, target, e = ConsoleCommand(service, "bash"); e != nil {
-		t.Fatalf("compose service refused: %v", e)
-	}
-	if target.Container != "339d361e351c" || target.Shell != "bash" {
-		t.Fatalf("compose service must attach to metadata.container, got %+v", target)
-	}
-
-	if cmd, _, e = ConsoleCommand(domain.Resource{Provider: "podman", Type: "podman_container", ExternalID: "abc123"}, "sh"); e != nil || cmd.Program != "podman" {
-		t.Fatalf("podman container must use podman, got %+v (%v)", cmd, e)
-	}
-
-	// Nothing with a single attachable container: there is no shell to open.
 	for _, r := range []domain.Resource{
 		{Provider: "dockercompose", Type: "docker_compose_project", ExternalID: "app"},
 		{Provider: "kubernetes", Type: "kubernetes_deployment", ExternalID: "api"},
 		{Provider: "systemd", Type: "systemd_service", ExternalID: "nginx.service"},
-		{Provider: "docker", Type: "docker_container", ExternalID: ""},
-		{Provider: "dockercompose", Type: "docker_compose_service", Metadata: map[string]any{}},
+		{Provider: "docker", Type: "docker_container", ExternalID: "abc;rm -rf /"},
+		{Provider: "dockercompose", Type: "docker_compose_service", ExternalID: "app/api"},
 	} {
-		if _, _, e = ConsoleCommand(r, "sh"); e == nil {
-			t.Fatalf("resource without an attachable container accepted: %+v", r)
+		if _, e = ConsoleCommand(r, ""); e == nil {
+			t.Fatalf("console accepted a resource with no container: %s/%s", r.Provider, r.Type)
 		}
 	}
-
-	for _, id := range []string{"abc;rm -rf /", "abc$(id)", "abc container", "-rf", "a..b", "abc\nwhoami"} {
-		if _, _, e = ConsoleCommand(domain.Resource{Provider: "docker", Type: "docker_container", ExternalID: id}, "sh"); e == nil {
-			t.Fatalf("container identifier accepted: %q", id)
+	for _, shell := range []string{"zsh", "sh -c id", "../bin/sh", "sh;id"} {
+		if _, e = ConsoleCommand(container, shell); e == nil {
+			t.Fatalf("console accepted shell %q", shell)
 		}
 	}
+}
 
-	for _, shell := range []string{"zsh", "python", "bash -c id", "../bin/sh", "sh;id"} {
-		if _, _, e = ConsoleCommand(container, shell); e == nil {
-			t.Fatalf("shell outside the allowlist accepted: %q", shell)
+func TestExecCommandRunsInsideTheConsoleContainer(t *testing.T) {
+	container := domain.Resource{Provider: "docker", Type: "docker_container", ExternalID: "abc123"}
+	cmd, e := ExecCommand(container, " ps aux ")
+	if e != nil || cmd.Program != "docker" || strings.Join(cmd.Args, " ") != "exec abc123 sh -c ps aux" {
+		t.Fatalf("exec command built wrong: %v %v", cmd, e)
+	}
+	// The script is one argument, so container shell syntax never reaches the host shell.
+	rendered, e := cmd.Render()
+	if e != nil {
+		t.Fatalf("exec command rejected by the executable allowlist: %v", e)
+	}
+	if rendered != "docker 'exec' 'abc123' 'sh' '-c' 'ps aux'" {
+		t.Fatalf("exec command rendered unquoted: %s", rendered)
+	}
+	hostile, e := ExecCommand(container, "cat /etc/hosts'; rm -rf / #")
+	if e != nil {
+		t.Fatalf("shell metacharacters must stay inside the container script: %v", e)
+	}
+	if rendered, e = hostile.Render(); e != nil || strings.Count(rendered, "docker") != 1 {
+		t.Fatalf("quote escape reached the host command line: %s %v", rendered, e)
+	}
+	service := domain.Resource{Provider: "podman", Type: "podman_container", ExternalID: "c8597c5a76a6"}
+	if cmd, e = ExecCommand(service, "id"); e != nil || cmd.Program != "podman" {
+		t.Fatalf("podman exec built wrong: %v %v", cmd, e)
+	}
+	for _, script := range []string{"", "   ", strings.Repeat("a", MaxExecScript+1), "id\x00"} {
+		if _, e = ExecCommand(container, script); e == nil {
+			t.Fatalf("exec accepted invalid script %q", script)
+		}
+	}
+	for _, r := range []domain.Resource{
+		{Provider: "dockercompose", Type: "docker_compose_project", ExternalID: "app"},
+		{Provider: "kubernetes", Type: "kubernetes_deployment", ExternalID: "api"},
+		{Provider: "docker", Type: "docker_container", ExternalID: "abc;rm -rf /"},
+	} {
+		if _, e = ExecCommand(r, "id"); e == nil {
+			t.Fatalf("exec accepted a resource with no console container: %s/%s", r.Provider, r.Type)
 		}
 	}
 }

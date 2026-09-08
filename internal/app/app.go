@@ -82,7 +82,7 @@ func Build(ctx context.Context, c config.Config) (*Application, error) {
 	if c.LDAPURL != "" {
 		identity.Providers["ldap"] = &auth.LDAP{Config: c}
 	}
-	ai := &agent.Runtime{DB: db, Secrets: secretProvider, Network: network, Engine: engine}
+	ai := &agent.Runtime{DB: db, Secrets: secretProvider, Network: network, Engine: engine, Exec: remote}
 	server := &api.Server{Config: c, DB: db, Auth: identity, SSH: remote, Secrets: secretProvider, Engine: engine, Discovery: disc, Network: network, AI: ai}
 	if c.Metrics {
 		server.Metrics = telemetry.Handler(db)
