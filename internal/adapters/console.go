@@ -4,58 +4,81 @@ import (
 	"fmt"
 	"github.com/thiagomontozo/infra-orchestrator/internal/domain"
 	"github.com/thiagomontozo/infra-orchestrator/internal/executor"
+	"strings"
 )
 
-// ConsoleTarget is the container an interactive session attaches to, after the
-// resource has been resolved to something that actually has one.
-type ConsoleTarget struct {
-	Provider  string
-	Container string
-	Shell     string
-}
-
-// consoleShells is the whole set of programs a session may start inside the
-// container. Anything else is refused before a command is built.
+// consoleShells are the only programs a console session may start inside the container.
 var consoleShells = map[string]bool{"sh": true, "bash": true}
 
-// ConsoleCommand resolves a resource to a container and builds the exec command
-// for it. Resources that are not a single container -- a compose project, a
-// kubernetes object, a systemd unit -- are refused, because there is nothing to
-// attach to. The command goes through Command.Render like every other remote
-// call, so the host binary allowlist still applies.
-func ConsoleCommand(r domain.Resource, shell string) (executor.Command, ConsoleTarget, error) {
+// ConsoleTarget returns the container a console session attaches to, and the CLI that
+// reaches it. Only container-backed resources qualify: a compose project has no single
+// container, so the caller must pick one of its services first.
+func ConsoleTarget(r domain.Resource) (program, container string, err error) {
+	switch r.Provider {
+	case "docker", "dockercompose":
+		program = "docker"
+	case "podman", "podmancompose":
+		program = "podman"
+	default:
+		return "", "", fmt.Errorf("console is not available for provider %q", r.Provider)
+	}
+	switch r.Type {
+	case "docker_container", "podman_container":
+		container = r.ExternalID
+	case "docker_compose_service":
+		container = domain.String(r.Metadata, "container")
+	default:
+		return "", "", fmt.Errorf("console requires a container; %q does not map to one", r.Type)
+	}
+	if container == "" {
+		return "", "", fmt.Errorf("resource has no container to attach to")
+	}
+	if !executor.ValidRef(container) {
+		return "", "", fmt.Errorf("invalid container identifier")
+	}
+	return program, container, nil
+}
+
+// ConsoleCommand builds the interactive shell command for a container-backed resource.
+// The shell is restricted to a fixed set so the argument cannot carry anything else.
+func ConsoleCommand(r domain.Resource, shell string) (executor.Command, error) {
 	var empty executor.Command
-	var t ConsoleTarget
 	if shell == "" {
 		shell = "sh"
 	}
 	if !consoleShells[shell] {
-		return empty, t, fmt.Errorf("shell not allowed")
+		return empty, fmt.Errorf("unsupported console shell")
 	}
-	container := ""
-	program := "docker"
-	switch r.Provider {
-	case "docker", "podman":
-		if r.Type == "docker_container" || r.Type == "podman_container" {
-			container = r.ExternalID
-		}
-	case "dockercompose", "podmancompose":
-		if r.Type == "docker_compose_service" {
-			container = domain.String(r.Metadata, "container")
-		}
+	program, container, e := ConsoleTarget(r)
+	if e != nil {
+		return empty, e
 	}
-	if r.Provider == "podman" || r.Provider == "podmancompose" {
-		program = "podman"
+	return executor.Command{Program: program, Args: []string{"exec", "--interactive", "--tty", container, shell}}, nil
+}
+
+// MaxExecScript bounds a single non-interactive command. It is far below the argument
+// limit the renderer enforces, so a runaway script is rejected here with a message the
+// caller can show rather than deep inside the executor.
+const MaxExecScript = 2000
+
+// ExecCommand builds a one-shot command that runs inside the same container a console
+// session would attach to. The script reaches the container's own shell as a single
+// quoted argument, so it cannot break out into the host command line; what it is allowed
+// to do inside the container is decided by the caller's permissions, not here.
+func ExecCommand(r domain.Resource, script string) (executor.Command, error) {
+	var empty executor.Command
+	script = strings.TrimSpace(script)
+	switch {
+	case script == "":
+		return empty, fmt.Errorf("empty command")
+	case len(script) > MaxExecScript:
+		return empty, fmt.Errorf("command exceeds %d characters", MaxExecScript)
+	case strings.ContainsRune(script, 0):
+		return empty, fmt.Errorf("command contains a null byte")
 	}
-	if container == "" {
-		return empty, t, fmt.Errorf("resource has no attachable container")
+	program, container, e := ConsoleTarget(r)
+	if e != nil {
+		return empty, e
 	}
-	if !executor.ValidRef(container) {
-		return empty, t, fmt.Errorf("invalid container identifier")
-	}
-	cmd := executor.Command{Program: program, Args: []string{"exec", "--interactive", "--tty", container, shell}}
-	if _, e := cmd.Render(); e != nil {
-		return empty, t, e
-	}
-	return cmd, ConsoleTarget{Provider: r.Provider, Container: container, Shell: shell}, nil
+	return executor.Command{Program: program, Args: []string{"exec", container, "sh", "-c", script}}, nil
 }

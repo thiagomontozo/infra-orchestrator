@@ -15,20 +15,22 @@ func ID() string {
 }
 
 type User struct {
-	ID            string     `json:"id"`
-	Username      string     `json:"username"`
-	Email         string     `json:"email"`
-	Role          string     `json:"role"`
-	Enabled       bool       `json:"enabled"`
-	Environments  []string   `json:"environments"`
-	MFARequired   bool       `json:"mfa_required"`
-	MFAEnabled    bool       `json:"mfa_enabled"`
-	ForcePassword bool       `json:"force_password_change"`
-	Service       bool       `json:"service_account"`
-	LastLogin     *time.Time `json:"last_login"`
-	PasswordHash  string     `json:"-"`
-	MFASecret     string     `json:"-"`
-	MFALast       int64      `json:"-"`
+	ID             string     `json:"id"`
+	Username       string     `json:"username"`
+	Email          string     `json:"email"`
+	Role           string     `json:"role"`
+	Enabled        bool       `json:"enabled"`
+	Environments   []string   `json:"environments"`
+	MFARequired    bool       `json:"mfa_required"`
+	MFAEnabled     bool       `json:"mfa_enabled"`
+	ForcePassword  bool       `json:"force_password_change"`
+	Service        bool       `json:"service_account"`
+	DisplayName    string     `json:"display_name"`
+	OfficeLocation string     `json:"office_location"`
+	LastLogin      *time.Time `json:"last_login"`
+	PasswordHash   string     `json:"-"`
+	MFASecret      string     `json:"-"`
+	MFALast        int64      `json:"-"`
 }
 type Principal struct {
 	User       User

@@ -211,6 +211,17 @@ func (c *capped) Write(p []byte) (int, error) {
 	c.b.Write(p)
 	return n, nil
 }
+
+// ExitCode reports the remote exit status behind an error from Run, and whether the
+// error carried one at all. A command that fails is still a result; a connection that
+// fails is not, and callers use this to tell the two apart.
+func ExitCode(e error) (int, bool) {
+	var exit *ssh.ExitError
+	if errors.As(e, &exit) {
+		return exit.ExitStatus(), true
+	}
+	return 0, false
+}
 func (s *SSH) Run(ctx context.Context, h domain.Host, cmd Command) (Result, error) {
 	ctx, span := otel.Tracer("executor").Start(ctx, "ssh.execute")
 	defer span.End()

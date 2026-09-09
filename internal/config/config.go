@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -17,11 +18,22 @@ type Config struct {
 	SSHTimeout, CommandTimeout, LLMTimeout, SessionTTL                                                                       time.Duration
 	Concurrency                                                                                                              int
 	OIDCIssuer, OIDCClientID, OIDCClientSecret, OIDCRedirect, OIDCGroupClaim, OIDCRoleMapping, OIDCScopes                    string
-	LDAPURL, LDAPBindDN, LDAPBindPassword, LDAPBaseDN, LDAPUserFilter, LDAPGroupAttribute, LDAPRoleMapping                   string
+	LDAPURL, LDAPBindDN, LDAPBindPassword, LDAPBaseDN, LDAPUserFilter, LDAPGroupAttribute, LDAPRoleMapping, LDAPDomain       string
+	LDAPStartTLS, LDAPAllowPlaintext, LDAPSkipVerify                                                                         bool
+	LDAPCACert                                                                                                               string
+	LDAPCAPool                                                                                                               *x509.CertPool
 }
 
 func Env(k, fallback string) string {
 	if v, ok := os.LookupEnv(k); ok {
+		return v
+	}
+	return fallback
+}
+
+// EnvSet treats an empty variable as unset, so a blank line in a .env file still falls back to the default.
+func EnvSet(k, fallback string) string {
+	if v := Env(k, ""); v != "" {
 		return v
 	}
 	return fallback
@@ -88,15 +100,72 @@ func Load() (c Config, err error) {
 	c.OIDCGroupClaim = Env("OIDC_GROUP_CLAIM", "groups")
 	c.OIDCRoleMapping = Env("OIDC_ROLE_MAPPING", "{}")
 	c.OIDCScopes = Env("OIDC_SCOPES", "openid profile email")
-	c.LDAPURL = Env("LDAP_URL", "")
+	c.LDAPDomain = strings.Trim(Env("LDAP_DOMAIN", ""), ".")
+	c.LDAPURL = LDAPEndpoint(Env("LDAP_SERVER", ""), Env("LDAP_URL", ""))
 	c.LDAPBindDN = Env("LDAP_BIND_DN", "")
 	c.LDAPBindPassword = Env("LDAP_BIND_PASSWORD", "")
-	c.LDAPBaseDN = Env("LDAP_BASE_DN", "")
-	c.LDAPUserFilter = Env("LDAP_USER_FILTER", "(uid=%s)")
-	c.LDAPGroupAttribute = Env("LDAP_GROUP_ATTRIBUTE", "memberOf")
-	c.LDAPRoleMapping = Env("LDAP_ROLE_MAPPING", "{}")
-	if c.LDAPURL != "" && !strings.HasPrefix(c.LDAPURL, "ldaps://") {
-		return c, fmt.Errorf("LDAP requires ldaps://")
+	c.LDAPBaseDN = EnvSet("LDAP_BASE_DN", BaseDN(c.LDAPDomain))
+	c.LDAPGroupAttribute = EnvSet("LDAP_GROUP_ATTRIBUTE", "memberOf")
+	c.LDAPRoleMapping = EnvSet("LDAP_ROLE_MAPPING", "{}")
+	c.LDAPStartTLS = EnvSet("LDAP_STARTTLS", "true") == "true"
+	c.LDAPAllowPlaintext = EnvSet("LDAP_ALLOW_PLAINTEXT", "false") == "true"
+	c.LDAPSkipVerify = EnvSet("LDAP_TLS_SKIP_VERIFY", "false") == "true"
+	c.LDAPCACert = Env("LDAP_CA_CERT", "")
+	if c.LDAPDomain != "" {
+		c.LDAPUserFilter = EnvSet("LDAP_USER_FILTER", "(sAMAccountName=%s)")
+	} else {
+		c.LDAPUserFilter = EnvSet("LDAP_USER_FILTER", "(uid=%s)")
+	}
+	if c.LDAPURL == "" {
+		return
+	}
+	if !strings.HasPrefix(c.LDAPURL, "ldaps://") && !strings.HasPrefix(c.LDAPURL, "ldap://") {
+		return c, fmt.Errorf("LDAP requires ldaps:// or ldap://")
+	}
+	if c.LDAPBaseDN == "" {
+		return c, fmt.Errorf("LDAP requires LDAP_BASE_DN or LDAP_DOMAIN")
+	}
+	if c.LDAPDomain == "" && c.LDAPBindDN == "" {
+		return c, fmt.Errorf("LDAP requires LDAP_DOMAIN (Active Directory) or LDAP_BIND_DN (search account)")
+	}
+	if strings.HasPrefix(c.LDAPURL, "ldap://") && !c.LDAPStartTLS && !c.LDAPAllowPlaintext {
+		return c, fmt.Errorf("ldap:// sends credentials in clear text; set LDAP_STARTTLS=true or LDAP_ALLOW_PLAINTEXT=true")
+	}
+	if c.LDAPCACert != "" {
+		pem, e := os.ReadFile(c.LDAPCACert)
+		if e != nil {
+			return c, fmt.Errorf("LDAP_CA_CERT unreadable: %w", e)
+		}
+		c.LDAPCAPool = x509.NewCertPool()
+		if !c.LDAPCAPool.AppendCertsFromPEM(pem) {
+			return c, fmt.Errorf("LDAP_CA_CERT holds no PEM certificate")
+		}
 	}
 	return
+}
+
+// LDAPEndpoint normalizes LDAP_SERVER (bare host, host:port or URL) into a dial URL, falling back to LDAP_URL.
+func LDAPEndpoint(server, url string) string {
+	if server == "" {
+		return url
+	}
+	if strings.Contains(server, "://") {
+		return server
+	}
+	if !strings.Contains(server, ":") {
+		return "ldap://" + server + ":389"
+	}
+	return "ldap://" + server
+}
+
+// BaseDN derives the directory root from an Active Directory domain: CORP.EXAMPLE.COM -> DC=CORP,DC=EXAMPLE,DC=COM.
+func BaseDN(domain string) string {
+	if domain == "" {
+		return ""
+	}
+	parts := strings.Split(domain, ".")
+	for i, p := range parts {
+		parts[i] = "DC=" + p
+	}
+	return strings.Join(parts, ",")
 }

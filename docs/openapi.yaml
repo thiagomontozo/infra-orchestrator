@@ -3064,6 +3064,228 @@
         }
       }
     },
+    "/api/v1/agents/debug": {
+      "post": {
+        "operationId": "post__api_v1_agents_debug",
+        "summary": "POST /api/v1/agents/debug",
+        "tags": [
+          "agents"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful query or mutation"
+          },
+          "400": {
+            "description": "Invalid structured input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "RBAC, policy, MFA, environment or CSRF denied"
+          },
+          "404": {
+            "description": "Resource not found"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "description": "Required for cookie authentication; value from io_csrf cookie.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Debug"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/chat": {
+      "get": {
+        "operationId": "get__api_v1_agents_chat",
+        "summary": "GET /api/v1/agents/chat",
+        "tags": [
+          "agents"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful query or mutation"
+          },
+          "400": {
+            "description": "Invalid structured input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "RBAC, policy, MFA, environment or CSRF denied"
+          },
+          "404": {
+            "description": "Resource not found"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "parameters": [
+          {
+            "name": "resource_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "post__api_v1_agents_chat",
+        "summary": "POST /api/v1/agents/chat",
+        "tags": [
+          "agents"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful query or mutation"
+          },
+          "400": {
+            "description": "Invalid structured input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "RBAC, policy, MFA, environment or CSRF denied"
+          },
+          "404": {
+            "description": "Resource not found"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "description": "Required for cookie authentication; value from io_csrf cookie.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Chat"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/chat/stream": {
+      "post": {
+        "operationId": "post__api_v1_agents_chat_stream",
+        "summary": "POST /api/v1/agents/chat/stream",
+        "tags": [
+          "agents"
+        ],
+        "responses": {
+          "200": {
+            "description": "Server-sent events for one chat turn: open, step, reasoning, thought, command, result, then done with the stored conversation, or error",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid structured input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "RBAC, policy, MFA, environment or CSRF denied"
+          },
+          "404": {
+            "description": "Resource not found"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "description": "Required for cookie authentication; value from io_csrf cookie.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Chat"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/deployments/execute": {
       "post": {
         "operationId": "post__api_v1_deployments_execute",
@@ -3780,6 +4002,50 @@
           },
           "question": {
             "type": "string"
+          }
+        }
+      },
+      "Debug": {
+        "type": "object",
+        "required": [
+          "resource_id",
+          "provider_id"
+        ],
+        "properties": {
+          "resource_id": {
+            "type": "string",
+            "description": "Container-backed resource. Commands run inside the container a console session would attach to, and require container.exec in that environment."
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string",
+            "maxLength": 1000
+          }
+        }
+      },
+      "Chat": {
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "conversation_id": {
+            "type": "string",
+            "description": "Continues an existing conversation owned by the caller; the stored resource wins over resource_id. Omit to start one."
+          },
+          "resource_id": {
+            "type": "string",
+            "description": "Container-backed resource, required when starting a conversation."
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
           }
         }
       },

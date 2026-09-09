@@ -11,57 +11,38 @@ import (
 	"github.com/thiagomontozo/infra-orchestrator/internal/rbac"
 	"github.com/thiagomontozo/infra-orchestrator/internal/security"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
 )
 
 const (
-	consoleSessionBudget = 20
-	consoleMaxDuration   = 30 * time.Minute
-	consolePingInterval  = 25 * time.Second
-	consoleReadLimit     = 64 * 1024
+	consoleSession = 30 * time.Minute
+	consoleKeep    = 25 * time.Second
+	consolePing    = 10 * time.Second
+	consoleInput   = 8192
 )
 
-// consoleWriter forwards terminal output as binary frames. Output is not passed
-// through security.Redact: escape sequences are what makes the terminal work,
-// and rewriting them would corrupt the screen.
+// consoleWriter streams shell output to the browser as binary frames. Terminal output
+// is never sanitized: escape sequences are what makes it a terminal, and the client
+// renders them in an emulator rather than as HTML.
 type consoleWriter struct {
 	ctx  context.Context
 	conn *websocket.Conn
 }
 
 func (c *consoleWriter) Write(p []byte) (int, error) {
-	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
-	defer cancel()
-	if e := c.conn.Write(ctx, websocket.MessageBinary, p); e != nil {
+	if e := c.conn.Write(c.ctx, websocket.MessageBinary, p); e != nil {
 		return 0, e
 	}
 	return len(p), nil
 }
 
-func consoleDimension(raw string) int {
-	v, e := strconv.Atoi(raw)
-	if e != nil {
-		return 0
-	}
-	return v
-}
-
-// console opens an interactive shell inside a container over a WebSocket.
-//
-// Protocol: binary frames carry keystrokes inbound and terminal output back;
-// text frames carry only {"rows":n,"cols":n}.
+// console attaches an interactive shell to a container over the host's SSH connection.
+// Unlike every other route this one is a long-lived socket, so all authorization runs
+// before the upgrade; afterwards failures can only be reported by closing the socket.
 func (s *Server) console(w http.ResponseWriter, r *http.Request, p domain.Principal) error {
-	// A WebSocket handshake is a GET, and Authenticate validates neither CSRF nor
-	// Origin on GET, so the handshake arrives with the session cookie and no
-	// X-CSRF-Token. Comparing Origin with PUBLIC_ORIGIN here is the only defence
-	// against another site opening a shell with the user's cookie. Removing it
-	// reintroduces cross-site WebSocket hijacking. It runs first so a cross-site
-	// caller cannot probe which resource ids exist.
-	if r.Header.Get("Origin") != s.Config.Origin {
-		return HTTPError{401, "origin validation failed"}
-	}
 	rs, h, e := s.visibleResource(r.Context(), p, r.PathValue("id"))
 	if e != nil {
 		return e
@@ -69,77 +50,50 @@ func (s *Server) console(w http.ResponseWriter, r *http.Request, p domain.Princi
 	if e = require(p, rbac.Permission(rs.Provider, "exec"), h.Environment); e != nil {
 		return e
 	}
-	cmd, target, e := adapters.ConsoleCommand(rs, r.URL.Query().Get("shell"))
+	cmd, e := adapters.ConsoleCommand(rs, r.URL.Query().Get("shell"))
 	if e != nil {
 		return bad(e.Error())
 	}
-	ok, e := s.DB.RateLimit(r.Context(), "console:"+p.User.ID, consoleSessionBudget, time.Hour)
+	// A WebSocket handshake is a GET, so it carries the session cookie without the CSRF
+	// header the mutating routes require. Origin is the defense against another site
+	// opening a shell with the user's cookie, and it is mandatory here.
+	if r.Header.Get("Origin") != s.Config.Origin {
+		return deny("origin validation failed")
+	}
+	ok, e := s.DB.RateLimit(r.Context(), "console:"+p.User.ID, 20, time.Hour)
 	if e != nil {
 		return e
 	}
 	if !ok {
-		return HTTPError{429, "console session budget reached"}
+		return HTTPError{429, "console session limit reached"}
 	}
-	if e = s.record(r, p, "resource.console", h.Environment, map[string]any{"resource_id": rs.ID, "host_id": h.ID, "container": target.Container, "shell": target.Shell}); e != nil {
-		return e
-	}
-	// Every check above has to stay above: once the response is hijacked the only
-	// thing this handler can still do is close the socket.
-	//
-	// The library's own origin check compares against the Host header and would
-	// reject the origin that arrives through the proxy, so it is skipped in favour
-	// of the explicit comparison already made above.
-	rc := http.NewResponseController(w)
-	_ = rc.SetReadDeadline(time.Time{})
-	_ = rc.SetWriteDeadline(time.Time{})
+	rows, _ := strconv.Atoi(r.URL.Query().Get("rows"))
+	cols, _ := strconv.Atoi(r.URL.Query().Get("cols"))
+	// The origin check above is stricter than the library's Host comparison, which would
+	// reject the proxied origin, so its own verification is skipped deliberately.
 	conn, e := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true, CompressionMode: websocket.CompressionDisabled})
 	if e != nil {
 		return nil
 	}
 	defer conn.CloseNow()
-	conn.SetReadLimit(consoleReadLimit)
-	started := time.Now()
-	ctx, cancel := context.WithTimeout(r.Context(), consoleMaxDuration)
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Time{})
+	_ = rc.SetWriteDeadline(time.Time{})
+	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	stdin, keys := io.Pipe()
+	_ = s.DB.Audit(ctx, domain.Event{Actor: p.User.ID, ActorType: "user", SourceIP: auth.IP(r), HostID: h.ID, ResourceID: rs.ID, Environment: h.Environment, Action: "resource.console", Decision: "allow", Metadata: map[string]any{"provider": rs.Provider, "shell": cmd.Args[len(cmd.Args)-1], "container": cmd.Args[len(cmd.Args)-2]}})
+	stdin, writer := io.Pipe()
 	resize := make(chan [2]int, 4)
+	go s.consoleRead(ctx, conn, writer, resize)
 	go func() {
-		defer close(resize)
-		defer keys.Close()
-		for {
-			kind, data, e := conn.Read(ctx)
-			if e != nil {
-				return
-			}
-			if kind == websocket.MessageBinary {
-				if _, e = keys.Write(data); e != nil {
-					return
-				}
-				continue
-			}
-			var size struct {
-				Rows int `json:"rows"`
-				Cols int `json:"cols"`
-			}
-			if json.Unmarshal(data, &size) != nil {
-				continue
-			}
-			select {
-			case resize <- [2]int{size.Rows, size.Cols}:
-			default:
-			}
-		}
-	}()
-	// An idle session is still a live session; ping so the proxy does not drop it.
-	go func() {
-		t := time.NewTicker(consolePingInterval)
+		t := time.NewTicker(consoleKeep)
 		defer t.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				ping, stop := context.WithTimeout(ctx, 10*time.Second)
+				ping, stop := context.WithTimeout(ctx, consolePing)
 				e := conn.Ping(ping)
 				stop()
 				if e != nil {
@@ -148,24 +102,44 @@ func (s *Server) console(w http.ResponseWriter, r *http.Request, p domain.Princi
 			}
 		}
 	}()
-	term := executor.Terminal{
-		Stdin:       stdin,
-		Stdout:      &consoleWriter{ctx: ctx, conn: conn},
-		Rows:        consoleDimension(r.URL.Query().Get("rows")),
-		Cols:        consoleDimension(r.URL.Query().Get("cols")),
-		Resize:      resize,
-		MaxDuration: consoleMaxDuration,
+	started := time.Now()
+	e = s.SSH.Shell(ctx, h, cmd, executor.Terminal{Rows: rows, Cols: cols, Stdin: stdin, Stdout: &consoleWriter{ctx, conn}, Resize: resize, MaxDuration: consoleSession})
+	_ = writer.Close()
+	result := "closed"
+	if e != nil {
+		result = security.Redact(e.Error())
+		slog.Info("console session ended", "resource", rs.ID, "actor", p.User.ID, "error", e)
 	}
-	reason := "session ended"
-	if e = s.SSH.Shell(ctx, h, cmd, term); e != nil {
-		reason = e.Error()
-	}
-	// The session itself is not recorded: keystrokes never reach the audit trail.
-	_ = s.DB.Audit(context.WithoutCancel(r.Context()), domain.Event{
-		Actor: p.User.ID, ActorType: "user", SourceIP: auth.IP(r), Action: "resource.console_ended",
-		ResourceID: rs.ID, Environment: h.Environment, Decision: "allow",
-		Metadata: map[string]any{"resource_id": rs.ID, "container": target.Container, "duration_seconds": int(time.Since(started).Seconds()), "reason": security.Redact(reason)},
-	})
-	conn.Close(websocket.StatusNormalClosure, "session ended")
+	_ = s.DB.Audit(context.WithoutCancel(ctx), domain.Event{Actor: p.User.ID, ActorType: "user", HostID: h.ID, ResourceID: rs.ID, Environment: h.Environment, SourceIP: auth.IP(r), Action: "resource.console_ended", Decision: "allow", Result: result, Metadata: map[string]any{"seconds": int(time.Since(started).Seconds())}})
+	_ = conn.Close(websocket.StatusNormalClosure, "session ended")
 	return nil
+}
+
+// consoleRead forwards keystrokes to the shell. Binary frames are raw input; text
+// frames carry the resize control message and nothing else.
+func (s *Server) consoleRead(ctx context.Context, conn *websocket.Conn, stdin *io.PipeWriter, resize chan<- [2]int) {
+	defer stdin.Close()
+	conn.SetReadLimit(consoleInput)
+	for {
+		typ, data, e := conn.Read(ctx)
+		if e != nil {
+			return
+		}
+		if typ == websocket.MessageBinary {
+			if _, e = stdin.Write(data); e != nil {
+				return
+			}
+			continue
+		}
+		var in struct {
+			Rows int `json:"rows"`
+			Cols int `json:"cols"`
+		}
+		if json.Unmarshal(data, &in) == nil && in.Rows > 0 && in.Cols > 0 {
+			select {
+			case resize <- [2]int{in.Rows, in.Cols}:
+			default:
+			}
+		}
+	}
 }

@@ -1,6 +1,6 @@
 # Adapters
 
-O núcleo depende de `Adapter`: Name, Detect, Discover, Capabilities, Execute, Logs. `Registry` escolhe implementação pelo provider persistido. Adapters não recebem uma string shell do usuário. O CLI constrói somente comandos permitidos, valida identificadores/opções, limita saída e escapa cada argumento.
+O núcleo depende de `Adapter`: Name, Detect, Discover, Capabilities, Execute, Logs. `Registry` escolhe implementação pelo provider persistido. Adapters não recebem uma string shell do usuário nas operações. O CLI constrói somente comandos permitidos, valida identificadores/opções, limita saída e escapa cada argumento. A exceção é `adapters.ExecCommand`, usado pelo laço de depuração do agente: ele aceita um script livre, mas o entrega como argumento único de `docker exec <container> sh -c`, de modo que o script vale dentro do container e o host continua vendo apenas um comando da allowlist.
 
 | Provider | Transporte | Inventário e operações |
 |---|---|---|

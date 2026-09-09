@@ -26,8 +26,9 @@ type Service struct {
 	Providers map[string]IdentityProvider
 }
 type Identity struct {
-	Subject, Username, Email, Role string
-	Groups                         []string
+	Subject, Username, Email, Role     string
+	DisplayName, OfficeLocation, Photo string
+	Groups                             []string
 }
 type IdentityProvider interface {
 	Authenticate(context.Context, string, string) (Identity, error)
@@ -100,12 +101,13 @@ func (s *Service) SyncIdentity(ctx context.Context, provider string, id Identity
 	e := s.DB.Pool.QueryRow(ctx, "SELECT id FROM users WHERE external_subject=$1", provider+":"+id.Subject).Scan(&uid)
 	if e != nil {
 		uid = domain.ID()
-		_, e = s.DB.Pool.Exec(ctx, "INSERT INTO users(id,username,email,role,environments,external_subject) VALUES($1,$2,$3,$4,'[]',$5)", uid, id.Username, id.Email, id.Role, provider+":"+id.Subject)
+		_, e = s.DB.Pool.Exec(ctx, "INSERT INTO users(id,username,email,role,environments,external_subject,display_name,office_location,photo) VALUES($1,$2,$3,COALESCE(NULLIF($4,''),'VIEWER'),'[]',$5,$6,$7,$8)", uid, id.Username, id.Email, id.Role, provider+":"+id.Subject, id.DisplayName, id.OfficeLocation, id.Photo)
 		if e != nil {
 			return domain.User{}, fmt.Errorf("external identity provisioning failed")
 		}
 	} else {
-		_, e = s.DB.Pool.Exec(ctx, "UPDATE users SET role=$2,email=$3 WHERE id=$1", uid, id.Role, id.Email)
+		// An empty role means no directory group matched, so the role assigned locally by an administrator stands.
+		_, e = s.DB.Pool.Exec(ctx, "UPDATE users SET role=COALESCE(NULLIF($2,''),role),email=$3,display_name=$4,office_location=$5,photo=$6 WHERE id=$1", uid, id.Role, id.Email, id.DisplayName, id.OfficeLocation, id.Photo)
 		if e != nil {
 			return domain.User{}, e
 		}

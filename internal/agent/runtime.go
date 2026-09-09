@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/thiagomontozo/infra-orchestrator/internal/adapters"
 	"github.com/thiagomontozo/infra-orchestrator/internal/domain"
+	"github.com/thiagomontozo/infra-orchestrator/internal/executor"
 	"github.com/thiagomontozo/infra-orchestrator/internal/llm"
 	"github.com/thiagomontozo/infra-orchestrator/internal/operations"
 	"github.com/thiagomontozo/infra-orchestrator/internal/rbac"
@@ -39,6 +40,22 @@ type Runtime struct {
 	Secrets secrets.Provider
 	Network *security.NetworkPolicy
 	Engine  *operations.Engine
+	Exec    executor.Executor
+}
+
+// evidence builds the read-only context both the advisory analysis and the debugging
+// session start from: resource state plus recent logs, redacted, as one JSON document.
+// Logs are included only when the adapter offers them and the caller may read them.
+func (r *Runtime) evidence(ctx context.Context, p domain.Principal, resource domain.Resource, host domain.Host) string {
+	logs := ""
+	if a, ok := r.Engine.Adapters[resource.Provider]; ok && domain.Contains(a.Capabilities(resource), "logs") && rbac.Allowed(p, rbac.Permission(resource.Provider, "logs"), host.Environment) {
+		out, e := a.Logs(ctx, adapters.LogRequest{Host: host, Resource: resource, Tail: 100, Since: "1h"})
+		if e == nil {
+			logs = out.Output
+		}
+	}
+	data, _ := json.Marshal(map[string]any{"resource_id": resource.ID, "name": resource.Name, "provider": resource.Provider, "state": resource.State, "health": resource.Health, "environment": host.Environment, "logs": security.Bounded(security.Redact(logs), 12000, 100)})
+	return security.Redact(string(data))
 }
 
 func (r *Runtime) provider(ctx context.Context, id string) (llm.Provider, domain.Object, error) {
@@ -79,6 +96,7 @@ func (r *Runtime) TestProvider(ctx context.Context, id string) (any, error) {
 	}
 	return map[string]any{"ok": true, "models": models}, nil
 }
+
 func ValidateDiagnosis(d Diagnosis, resource domain.Resource) error {
 	if d.Summary == "" || len(d.Summary) > 10000 || !domain.Contains([]string{"low", "medium", "high"}, d.Risk) {
 		return fmt.Errorf("invalid diagnosis")
@@ -158,15 +176,6 @@ func (r *Runtime) Analyze(ctx context.Context, p domain.Principal, resourceID, p
 	if config.Environment != "" && config.Environment != host.Environment {
 		return o, operations.Denied{Reason: "provider environment denied"}
 	}
-	logs := ""
-	if a, ok := r.Engine.Adapters[resource.Provider]; ok && domain.Contains(a.Capabilities(resource), "logs") && rbac.Allowed(p, rbac.Permission(resource.Provider, "logs"), host.Environment) {
-		out, e := a.Logs(ctx, adapters.LogRequest{Host: host, Resource: resource, Tail: 100, Since: "1h"})
-		if e == nil {
-			logs = out.Output
-		}
-	}
-	contextData := map[string]any{"resource_id": resource.ID, "name": resource.Name, "provider": resource.Provider, "state": resource.State, "health": resource.Health, "environment": host.Environment, "logs": security.Bounded(security.Redact(logs), 12000, 100)}
-	data, _ := json.Marshal(contextData)
 	budget := int(domain.Number(config.Data, "max_context")) * 3
 	if budget < 4096 {
 		budget = 4096
@@ -174,7 +183,7 @@ func (r *Runtime) Analyze(ctx context.Context, p domain.Principal, resourceID, p
 	if budget > 16000 {
 		budget = 16000
 	}
-	untrusted := security.Bounded(security.Redact(string(data)), budget, 150)
+	untrusted := security.Bounded(r.evidence(ctx, p, resource, host), budget, 150)
 	question = security.Bounded(security.Redact(question), 1000, 10)
 	raw, e := provider.Complete(ctx, []llm.Message{{Role: "system", Content: SystemPolicy}, {Role: "system", Content: toolScope(resource)}, {Role: "user", Content: "Diagnostic request: " + question}, {Role: "user", Content: "untrusted_data (read-only evidence):\n" + untrusted}})
 	if e != nil {

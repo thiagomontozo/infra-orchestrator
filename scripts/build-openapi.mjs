@@ -17,6 +17,8 @@ const schemas={
  Approval:{type:'object',required:['approve','reason'],properties:{approve:{type:'boolean'},reason:{type:'string',minLength:3}}},
  Cluster:{type:'object',required:['name','environment','kubeconfig'],properties:{name:{type:'string'},environment:{type:'string'},kubeconfig:{type:'string',writeOnly:true}}},
  Analyze:{type:'object',required:['resource_id','provider_id'],properties:{resource_id:{type:'string'},provider_id:{type:'string'},question:{type:'string'}}},
+ Debug:{type:'object',required:['resource_id','provider_id'],properties:{resource_id:{type:'string',description:'Container-backed resource. Commands run inside the container a console session would attach to, and require container.exec in that environment.'},provider_id:{type:'string'},question:{type:'string',maxLength:1000}}},
+ Chat:{type:'object',required:['message'],properties:{conversation_id:{type:'string',description:'Continues an existing conversation owned by the caller; the stored resource wins over resource_id. Omit to start one.'},resource_id:{type:'string',description:'Container-backed resource, required when starting a conversation.'},provider_id:{type:'string'},message:{type:'string',minLength:1,maxLength:4000}}},
  Tool:{type:'object',required:['tool','resource_id','reason','recommendation_id'],properties:{tool:{enum:['restart_container','restart_service','restart_deployment']},resource_id:{type:'string'},reason:{type:'string'},recommendation_id:{type:'string'}}}
 };
 const spec={openapi:'3.1.0',info:{title:'infra-orchestrator API',version:'0.1.0',description:'Authenticated infrastructure control plane. All remote mutations pass through RBAC, policy and the operation queue. Responses never expose stored credentials.'},servers:[{url:'/'}],security:[{session:[]},{bearer:[]}],paths:{},components:{securitySchemes:{session:{type:'apiKey',in:'cookie',name:'io_session'},bearer:{type:'http',scheme:'bearer'}},schemas}};
@@ -26,7 +28,9 @@ for(const [,method,path] of routes){
  if(method!=='GET')params.push({name:'X-CSRF-Token',in:'header',required:false,description:'Required for cookie authentication; value from io_csrf cookie.',schema:{type:'string'}});
  if(method==='POST'&&(/operations$|operations\/batch$|provisioning|deployments\/execute|\/rollback$|agents\/tools$/.test(path)))params.push({name:'Idempotency-Key',in:'header',required:true,schema:{type:'string',maxLength:128}});
  if(path.endsWith('/logs'))params.push({name:'tail',in:'query',schema:{type:'integer',minimum:1,maximum:2000,default:200}},{name:'download',in:'query',schema:{type:'boolean'}});
+ if(method==='GET'&&path.endsWith('/agents/chat'))params.push({name:'resource_id',in:'query',required:true,schema:{type:'string'}});
  if(path.endsWith('/read'))params.push({name:'action',in:'query',required:true,schema:{type:'string',enum:['status','inspect','stats','describe','events','rollout_status','rollout_history']}});
+ if(path.endsWith('/agents/chat/stream'))op.responses['200']={description:'Server-sent events for one chat turn: open, step, reasoning, thought, command, result, then done with the stored conversation, or error',content:{'text/event-stream':{schema:{type:'string'}}}};
  if(path.endsWith('/events')){params.push({name:'Last-Event-ID',in:'header',schema:{type:'string'}});op.responses['200']={description:'Persistent event stream',content:{'text/event-stream':{schema:{type:'string'}}}};}
  if(params.length)op.parameters=params;
  if(/auth\/(login|config|oidc\/start|oidc\/callback)$|\/openapi$/.test(path))op.security=[];
@@ -38,6 +42,8 @@ for(const [,method,path] of routes){
  else if(path.endsWith('/provisioning/containers'))schema=ref('Provision');
  else if(path.endsWith('/kubernetes/clusters'))schema=ref('Cluster');
  else if(path.endsWith('/agents/analyze'))schema=ref('Analyze');
+ else if(path.endsWith('/agents/debug'))schema=ref('Debug');
+ else if(method==='POST'&&/\/agents\/chat(?:\/stream)?$/.test(path))schema=ref('Chat');
  else if(path.endsWith('/agents/tools'))schema=ref('Tool');
  else if(/POST|PUT/.test(method)&&/\/llm\/providers(?:\/\{id\})?$/.test(path))schema=ref('Provider');
  else if(/POST|PUT/.test(method)&&path.includes('{kind}'))schema=ref('Object');

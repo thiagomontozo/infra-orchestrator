@@ -6,4 +6,6 @@ Cada usuário possui lista `environments`. `*` significa todos os ambientes. For
 
 Recursos são lidos pelo ambiente atual do host, e não somente pela cópia existente no inventário. Operações são revalidadas no momento da execução; mudança do ambiente provoca rejeição e nova submissão. Políticas nunca concedem permissão ausente no RBAC.
 
+`container.exec` autoriza três caminhos de execução dentro do container, todos sem aprovação de segunda pessoa: o console interativo, o laço autônomo de depuração e o chat com o agente, os dois últimos exigindo também `llm.use`. Conceder `container.exec` a um papel ou a um scope de token é conceder shell no container; a diferença é que a sessão do agente fica gravada comando a comando na auditoria.
+
 Não há editor de papéis personalizados nesta versão. Alterações de papéis fixos exigem revisão de código e testes. A UI reflete o RBAC por conveniência; todos os endpoints aplicam autorização no servidor.

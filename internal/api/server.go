@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/jackc/pgx/v5"
+	"github.com/thiagomontozo/infra-orchestrator/internal/agent"
 	"github.com/thiagomontozo/infra-orchestrator/internal/auth"
 	"github.com/thiagomontozo/infra-orchestrator/internal/cache"
 	"github.com/thiagomontozo/infra-orchestrator/internal/config"
@@ -42,6 +43,9 @@ type Server struct {
 }
 type AIService interface {
 	Analyze(context.Context, domain.Principal, string, string, string) (domain.Object, error)
+	Debug(context.Context, domain.Principal, string, string, string) (domain.Object, error)
+	Chat(context.Context, domain.Principal, string, string, string, string, agent.Emitter) (domain.Object, error)
+	Conversations(context.Context, domain.Principal, string) ([]domain.Object, error)
 	TestProvider(context.Context, string) (any, error)
 	Tool(context.Context, domain.Principal, string, string, string, string) (any, error)
 }
@@ -213,6 +217,10 @@ func (s *Server) Handler() http.Handler {
 	s.route("POST /api/v1/llm/providers/{id}/test", s.testProvider)
 	s.route("POST /api/v1/agents/analyze", s.analyze)
 	s.route("POST /api/v1/agents/tools", s.agentTool)
+	s.route("POST /api/v1/agents/debug", s.agentDebug)
+	s.route("GET /api/v1/agents/chat", s.agentConversations)
+	s.route("POST /api/v1/agents/chat", s.agentChat)
+	s.route("POST /api/v1/agents/chat/stream", s.agentChatStream)
 	s.route("POST /api/v1/deployments/execute", s.deploy)
 	s.route("POST /api/v1/deployments/{id}/rollback", s.rollback)
 	s.route("POST /api/v1/gitops/{id}/diff", s.gitopsDiff)

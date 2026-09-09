@@ -1,12 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/robfig/cron/v3"
+	"github.com/thiagomontozo/infra-orchestrator/internal/agent"
 	"github.com/thiagomontozo/infra-orchestrator/internal/domain"
 	"github.com/thiagomontozo/infra-orchestrator/internal/operations"
 	"github.com/thiagomontozo/infra-orchestrator/internal/policy"
 	"github.com/thiagomontozo/infra-orchestrator/internal/rbac"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -317,6 +321,130 @@ func (s *Server) analyze(w http.ResponseWriter, r *http.Request, p domain.Princi
 		return badOrDenied(e)
 	}
 	jsonResponse(w, 200, publicObject(out))
+	return nil
+}
+
+// agentDebug runs an interactive debugging session: the model issues commands inside the
+// container and reads their output. It holds the request open for the whole session, so
+// the deadline covers every turn the runtime is allowed to take.
+func (s *Server) agentDebug(w http.ResponseWriter, r *http.Request, p domain.Principal) error {
+	var in struct {
+		ResourceID string `json:"resource_id"`
+		ProviderID string `json:"provider_id"`
+		Question   string `json:"question"`
+	}
+	if e := decode(w, r, &in); e != nil {
+		return e
+	}
+	if s.AI == nil {
+		return HTTPError{503, "AI not configured"}
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), agent.DebugSteps*(s.Config.LLMTimeout+s.Config.CommandTimeout))
+	defer cancel()
+	out, e := s.AI.Debug(ctx, p, in.ResourceID, in.ProviderID, in.Question)
+	if e != nil {
+		return badOrDenied(e)
+	}
+	jsonResponse(w, 200, publicObject(out))
+	return nil
+}
+
+// agentChat advances one conversation about a container by a single exchange. Like the
+// debugging session it holds the request open while the model works, so the deadline
+// covers every command this reply is allowed to run.
+func (s *Server) agentChat(w http.ResponseWriter, r *http.Request, p domain.Principal) error {
+	var in struct {
+		ConversationID string `json:"conversation_id"`
+		ResourceID     string `json:"resource_id"`
+		ProviderID     string `json:"provider_id"`
+		Message        string `json:"message"`
+	}
+	if e := decode(w, r, &in); e != nil {
+		return e
+	}
+	if s.AI == nil {
+		return HTTPError{503, "AI not configured"}
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), agent.ChatSteps*(s.Config.LLMTimeout+s.Config.CommandTimeout))
+	defer cancel()
+	out, e := s.AI.Chat(ctx, p, in.ConversationID, in.ResourceID, in.ProviderID, in.Message, nil)
+	if e != nil {
+		return badOrDenied(e)
+	}
+	jsonResponse(w, 200, publicObject(out))
+	return nil
+}
+
+// agentChatStream is agentChat with a spectator. It runs the identical exchange and emits
+// the model's thinking, each command and each result as they happen, so a turn that takes
+// minutes is legible while it runs instead of only after. The response is committed as
+// soon as the stream opens, so failures after that point arrive as an error event rather
+// than an HTTP status.
+func (s *Server) agentChatStream(w http.ResponseWriter, r *http.Request, p domain.Principal) error {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return HTTPError{503, "streaming unavailable"}
+	}
+	var in struct {
+		ConversationID string `json:"conversation_id"`
+		ResourceID     string `json:"resource_id"`
+		ProviderID     string `json:"provider_id"`
+		Message        string `json:"message"`
+	}
+	if e := decode(w, r, &in); e != nil {
+		return e
+	}
+	if s.AI == nil {
+		return HTTPError{503, "AI not configured"}
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), agent.ChatSteps*(s.Config.LLMTimeout+s.Config.CommandTimeout))
+	defer cancel()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(200)
+	// The emitter runs on this goroutine, inside the Chat call, so the writer needs no
+	// synchronization of its own.
+	send := func(event string, v any) {
+		if b, e := json.Marshal(v); e == nil {
+			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
+			flusher.Flush()
+		}
+	}
+	send("open", map[string]string{"status": "working"})
+	out, e := s.AI.Chat(ctx, p, in.ConversationID, in.ResourceID, in.ProviderID, in.Message, func(v agent.ChatEvent) { send(v.Type, v) })
+	if e != nil {
+		status, message := 500, "the conversation failed"
+		if failure, ok := badOrDenied(e).(HTTPError); ok {
+			status, message = failure.Status, failure.Message
+		}
+		slog.Info("agent chat stream failed", "actor", p.User.ID, "resource", in.ResourceID, "error", e)
+		send("error", map[string]any{"status": status, "error": message})
+		return nil
+	}
+	send("done", publicObject(out))
+	return nil
+}
+
+// agentConversations lists the caller's own conversations about one resource so the
+// console panel can reopen the last one instead of starting over.
+func (s *Server) agentConversations(w http.ResponseWriter, r *http.Request, p domain.Principal) error {
+	if s.AI == nil {
+		return HTTPError{503, "AI not configured"}
+	}
+	id := r.URL.Query().Get("resource_id")
+	if id == "" {
+		return bad("resource_id is required")
+	}
+	all, e := s.AI.Conversations(r.Context(), p, id)
+	if e != nil {
+		return badOrDenied(e)
+	}
+	out := []domain.Object{}
+	for _, o := range all {
+		out = append(out, publicObject(o))
+	}
+	jsonResponse(w, 200, out)
 	return nil
 }
 func (s *Server) agentTool(w http.ResponseWriter, r *http.Request, p domain.Principal) error {

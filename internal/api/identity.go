@@ -76,7 +76,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, 200, map[string]any{"user": u, "csrf_token": csrf, "mfa": mfa, "mfa_enrollment_required": u.MFARequired && !mfa, "permissions": rbac.Permissions(u.Role)})
 }
 func (s *Server) me(w http.ResponseWriter, r *http.Request, p domain.Principal) error {
-	jsonResponse(w, 200, map[string]any{"user": p.User, "mfa": p.MFA, "permissions": rbac.Permissions(p.User.Role), "session_id": p.SessionID, "name": s.Config.Name})
+	jsonResponse(w, 200, map[string]any{"user": p.User, "mfa": p.MFA, "permissions": rbac.Permissions(p.User.Role), "session_id": p.SessionID, "name": s.Config.Name, "photo": s.DB.UserPhoto(r.Context(), p.User.ID)})
 	return nil
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request, p domain.Principal) error {
