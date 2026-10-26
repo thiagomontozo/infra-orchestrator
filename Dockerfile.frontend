@@ -4,7 +4,7 @@ COPY web/package.json web/package-lock.json ./
 RUN --mount=type=secret,id=extra_ca if [ -s /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca; fi; npm ci --ignore-scripts
 COPY web/ ./
 RUN npm run build
-FROM nginxinc/nginx-unprivileged:1.30-alpine
+FROM nginxinc/nginx-unprivileged:1.31-alpine
 USER root
 RUN --mount=type=secret,id=extra_ca if [ -s /run/secrets/extra_ca ]; then cat /run/secrets/extra_ca >> /etc/ssl/certs/ca-certificates.crt; fi; apk upgrade --no-cache
 USER 101
